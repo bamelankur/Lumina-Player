@@ -126,13 +126,43 @@ class ModulesService extends ChangeNotifier {
     error = null;
     notifyListeners();
     try {
-      final response = await http.get(Uri.parse(synthetiqRepositoryUrl)).timeout(
-        const Duration(seconds: 25),
-      );
-      if (response.statusCode != 200) {
-        throw HttpException('Repository returned HTTP ${response.statusCode}');
+      dynamic decoded;
+      Object? rawFailure;
+      try {
+        final response = await http.get(Uri.parse(synthetiqRepositoryUrl)).timeout(
+          const Duration(seconds: 20),
+        );
+        if (response.statusCode != 200) {
+          throw HttpException('Raw repository returned HTTP ${response.statusCode}');
+        }
+        decoded = jsonDecode(response.body);
+      } catch (e) {
+        rawFailure = e;
+        // Some networks can resolve github.com but fail to resolve
+        // raw.githubusercontent.com. Use GitHub's Contents API as a fallback.
+        try {
+          final apiUri = Uri.parse(
+            'https://api.github.com/repos/kas021/Synthetiq-Modules/contents/repository.json?ref=main',
+          );
+          final response = await http.get(apiUri, headers: const {
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          }).timeout(const Duration(seconds: 25));
+          if (response.statusCode != 200) {
+            throw HttpException('GitHub API returned HTTP ${response.statusCode}');
+          }
+          final envelope = jsonDecode(response.body);
+          if (envelope is! Map || envelope['content'] is! String) {
+            throw const FormatException('GitHub API did not return repository file content.');
+          }
+          final encoded = (envelope['content'] as String).replaceAll(RegExp(r'\\s'), '');
+          decoded = jsonDecode(utf8.decode(base64Decode(encoded)));
+        } catch (fallbackError) {
+          throw HttpException(
+            'Could not reach the module repository. Raw host error: $rawFailure. GitHub API fallback: $fallbackError',
+          );
+        }
       }
-      final decoded = jsonDecode(response.body);
       if (decoded is! Map || decoded['modules'] is! List) {
         throw const FormatException('Repository catalogue format is not supported.');
       }
