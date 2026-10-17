@@ -155,7 +155,7 @@ class ModulesService extends ChangeNotifier {
           if (envelope is! Map || envelope['content'] is! String) {
             throw const FormatException('GitHub API did not return repository file content.');
           }
-          final encoded = (envelope['content'] as String).replaceAll(RegExp(r'\\s'), '');
+          final encoded = (envelope['content'] as String).replaceAll(RegExp(r'\s'), '');
           decoded = jsonDecode(utf8.decode(base64Decode(encoded)));
         } catch (fallbackError) {
           throw HttpException(
