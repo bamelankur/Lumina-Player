@@ -20,6 +20,11 @@ dependencies:
   crypto: ^3.0.6
   path_provider: ^2.1.4
 
+dependency_overrides:
+  # Keep the transitive Android lifecycle plugin compatible with file_picker's
+  # compile SDK until all Flutter plugins in this project target API 36.
+  flutter_plugin_android_lifecycle: 2.0.24
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
