@@ -15,6 +15,7 @@ class ModulesScreen extends StatefulWidget {
 class _ModulesScreenState extends State<ModulesScreen> {
   int _tab = 0;
   final Set<String> _installing = {};
+  final TextEditingController _repositoryUrl = TextEditingController(text: luminaRepositoryUrl);
 
   @override
   void initState() {
@@ -23,8 +24,31 @@ class _ModulesScreenState extends State<ModulesScreen> {
       if (!mounted) return;
       final service = context.read<ModulesService>();
       service.load();
-      service.loadRepository();
+      service.loadRepository().then((_) {
+        if (mounted) _repositoryUrl.text = service.repositoryUrl;
+      });
     });
+  }
+
+  @override
+  void dispose() {
+    _repositoryUrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _addRepository() async {
+    final url = _repositoryUrl.text.trim();
+    if (url.isEmpty) {
+      _message('Paste a repository JSON URL first.');
+      return;
+    }
+    try {
+      await context.read<ModulesService>().setRepositoryUrl(url);
+      if (mounted) setState(() => _tab = 1);
+      _message('Repository URL saved.');
+    } catch (e) {
+      _message('Could not add repository: ${e.toString().replaceFirst('Exception: ', '')}');
+    }
   }
 
   void _message(String text) {
@@ -120,6 +144,30 @@ class _ModulesScreenState extends State<ModulesScreen> {
                 },
                 icon: const Icon(Icons.refresh),
               ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _repositoryUrl,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.go,
+                  onSubmitted: (_) => _addRepository(),
+                  decoration: const InputDecoration(
+                    labelText: 'Repository JSON URL',
+                    hintText: 'https://example.com/repository.json',
+                    prefixIcon: Icon(Icons.link),
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(onPressed: service.loading ? null : _addRepository, child: const Text('Add')),
             ],
           ),
         ),
