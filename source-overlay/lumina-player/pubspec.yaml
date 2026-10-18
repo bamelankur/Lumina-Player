@@ -25,6 +25,10 @@ dependency_overrides:
   # Keep the transitive Android lifecycle plugin compatible with file_picker's
   # compile SDK until all Flutter plugins in this project target API 36.
   flutter_plugin_android_lifecycle: 2.0.24
+  # shared_preferences_android 2.5.x reads settings through JNI and fails at
+  # runtime on the device with NoSuchMethodError (SharedPreferencesApiRegistrar
+  # .getAll). Stay on the 2.4 series, which uses the normal platform channel.
+  shared_preferences_android: ">=2.4.2 <2.5.0"
 
 dev_dependencies:
   flutter_test:
