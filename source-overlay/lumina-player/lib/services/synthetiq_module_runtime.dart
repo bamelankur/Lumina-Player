@@ -34,11 +34,16 @@ class SynthetiqModuleRuntime {
     final metadataFile = File('${module.directory}${Platform.pathSeparator}module.json');
     final metadata = jsonDecode(await metadataFile.readAsString());
     if (metadata is! Map) throw const FormatException('Module metadata is invalid.');
+    final moduleSystem = '${metadata['moduleSystem'] ?? 'synthetiq'}'.toLowerCase();
     final contract = int.tryParse('${metadata['contractVersion'] ?? metadata['formatVersion'] ?? 0}') ?? 0;
-    // The public Synthetiq module guide documents Contract V3. Support that
-    // published contract and later compatible versions rather than V4 only.
-    if (contract < 3) {
-      throw FormatException('Unsupported module contract $contract. Lumina requires Synthetiq Contract V3 or later.');
+    // Lumina-native modules use our small, stable API. Existing Synthetiq
+    // modules continue to use the published Contract V3+ handler contract.
+    if (moduleSystem == 'lumina') {
+      if (contract < 1) {
+        throw FormatException('Unsupported Lumina module contract $contract. Lumina requires contract V1 or later.');
+      }
+    } else if (contract < 3) {
+      throw FormatException('Unsupported Synthetiq module contract $contract. Lumina requires Synthetiq Contract V3 or later.');
     }
     final contentType = '${metadata['contentType'] ?? 'video'}'.toLowerCase();
     if (!const {'video', 'image', 'text', 'music'}.contains(contentType)) {
@@ -81,6 +86,19 @@ class SynthetiqModuleRuntime {
         '''),
       );
       await engine.eval(source: JsCode.code(source));
+      if (moduleSystem == 'lumina') {
+        await engine.eval(source: JsCode.code(r'''
+          const api = globalThis.LuminaModule;
+          if (!api || api.apiVersion !== 1) {
+            throw new Error('Lumina module must export globalThis.LuminaModule with apiVersion: 1.');
+          }
+          if (typeof api.search === 'function') globalThis.searchResults = (...args) => api.search(...args);
+          if (typeof api.details === 'function') globalThis.extractDetails = (...args) => api.details(...args);
+          if (typeof api.episodes === 'function') globalThis.extractEpisodes = (...args) => api.episodes(...args);
+          if (typeof api.stream === 'function') globalThis.extractStreamUrl = (...args) => api.stream(...args);
+          if (typeof api.home === 'function') globalThis.discoveryHome = (...args) => api.home(...args);
+        '''), options: JsEvalOptions.withPromise());
+      }
       final exports = await engine.eval(
         source: JsCode.code(r'''
           JSON.stringify({
