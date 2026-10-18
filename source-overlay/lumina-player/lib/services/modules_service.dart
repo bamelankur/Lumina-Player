@@ -9,8 +9,8 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-const synthetiqRepositoryUrl =
-    'https://raw.githubusercontent.com/kas021/Synthetiq-Modules/main/repository.json';
+const luminaRepositoryUrl =
+    'https://raw.githubusercontent.com/bamelankur/Lumina-Modules/main/repository.json';
 
 class InstalledModule {
   const InstalledModule({
@@ -129,7 +129,7 @@ class ModulesService extends ChangeNotifier {
       dynamic decoded;
       Object? rawFailure;
       try {
-        final response = await http.get(Uri.parse(synthetiqRepositoryUrl)).timeout(
+        final response = await http.get(Uri.parse(luminaRepositoryUrl)).timeout(
           const Duration(seconds: 20),
         );
         if (response.statusCode != 200) {
@@ -142,7 +142,7 @@ class ModulesService extends ChangeNotifier {
         // raw.githubusercontent.com. Use GitHub's Contents API as a fallback.
         try {
           final apiUri = Uri.parse(
-            'https://api.github.com/repos/kas021/Synthetiq-Modules/contents/repository.json?ref=main',
+            'https://api.github.com/repos/bamelankur/Lumina-Modules/contents/repository.json?ref=main',
           );
           final response = await http.get(apiUri, headers: const {
             'Accept': 'application/vnd.github+json',
@@ -178,7 +178,7 @@ class ModulesService extends ChangeNotifier {
       items.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       catalogue = items;
     } catch (e) {
-      error = 'Could not load module repository: $e';
+      error = 'Could not load Lumina module catalogue: $e';
     } finally {
       loading = false;
       notifyListeners();
@@ -234,7 +234,7 @@ class ModulesService extends ChangeNotifier {
         extracted[normalized] = content;
       }
     }
-    // Synthetiq packages may name the manifest after the module, e.g.
+    // Some compatible third-party packages may name the manifest after the module, e.g.
     // example-module.json. The public contract expects one JSON manifest.
     final manifests = extracted.keys
         .where((key) => p.extension(key).toLowerCase() == '.json')
