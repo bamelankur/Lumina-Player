@@ -113,7 +113,7 @@ class SynthetiqModuleRuntime {
     final source = 'JSON.stringify(await globalThis[${jsonEncode(function)}](...$argsJson))';
     final result = await engine.eval(
       source: JsCode.code(source),
-      options: JsEngine.withPromise(),
+      options: JsEvalOptions.withPromise(),
     );
     final value = result.value;
     if (value == null || value == 'undefined') return null;
