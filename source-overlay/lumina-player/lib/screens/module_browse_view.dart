@@ -5,7 +5,7 @@ import 'package:video_player/video_player.dart';
 import '../services/modules_service.dart';
 import '../services/synthetiq_module_runtime.dart';
 
-/// A lightweight Contract V4 catalogue browser backed by installed modules.
+/// A Synthetiq module browser backed by the documented module handlers.
 class ModuleBrowseView extends StatefulWidget {
   const ModuleBrowseView({super.key});
 
@@ -36,7 +36,7 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
         _results.clear();
         _errors
           ..clear()
-          ..['modules'] = 'Install a Contract V4 video module from the Repository tab first.';
+          ..['modules'] = 'Install a compatible Synthetiq video module from the Repository tab first.';
       });
       return;
     }
@@ -68,12 +68,12 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
               value = await _runtime.call(module, 'extractHome');
               list = value is List ? value : (value is Map && value['items'] is List ? value['items'] as List : const <dynamic>[]);
             } catch (_) {
-              value = await _runtime.call(module, 'searchResults', ['', 0]);
+              value = await _runtime.call(module, 'searchResults', ['']);
               list = value is List ? value : const [];
             }
           }
         } else {
-          value = await _runtime.call(module, 'searchResults', [_query.text.trim(), 0]);
+          value = await _runtime.call(module, 'searchResults', [_query.text.trim()]);
           list = value is List ? value : const [];
         }
         _results[module.id] = list;
