@@ -1,0 +1,14 @@
+{
+  "id": "lumina-demo",
+  "name": "Lumina Playback Test",
+  "moduleSystem": "lumina",
+  "contractVersion": 1,
+  "moduleVersion": "1.0.0",
+  "contentType": "video",
+  "description": "Diagnostic provider for testing Lumina search, episodes, stream resolution, and playback.",
+  "config": {
+    "runtime": {
+      "entry": "index.js"
+    }
+  }
+}
