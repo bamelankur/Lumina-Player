@@ -44,6 +44,23 @@ jobs:
               raise SystemExit("Could not confirm Android app compileSdk is set to 36.")
           PY
 
+      - name: Ensure Android INTERNET permission
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("lumina-player/android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          perm = '<uses-permission android:name="android.permission.INTERNET"/>'
+          if "android.permission.INTERNET" in s:
+              print("INTERNET permission already declared in main manifest")
+          else:
+              print("INTERNET permission MISSING from main manifest; adding it")
+              i = s.index("<application")
+              s = s[:i] + perm + "\n    " + s[i:]
+              p.write_text(s)
+          print(p.read_text())
+          PY
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -64,12 +81,20 @@ jobs:
         run: flutter build apk --release
         working-directory: lumina-player
 
+      - name: Verify INTERNET permission in built APK
+        run: |
+          AAPT=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -1)
+          "$AAPT" dump permissions lumina-player/build/app/outputs/flutter-apk/app-release.apk | tee perms.txt
+          grep -q "android.permission.INTERNET" perms.txt
+
       - name: Package Lumina demo module
+        if: hashFiles('examples/lumina-demo/module.json') != ''
         run: |
           cd examples/lumina-demo
           zip -q ../../lumina-demo-module.zip module.json index.js
 
       - name: Upload Lumina demo module
+        if: hashFiles('examples/lumina-demo/module.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: lumina-demo-module
