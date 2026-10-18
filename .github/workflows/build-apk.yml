@@ -64,6 +64,17 @@ jobs:
         run: flutter build apk --release
         working-directory: lumina-player
 
+      - name: Package Lumina demo module
+        run: |
+          cd examples/lumina-demo
+          zip -q ../../lumina-demo-module.zip module.json index.js
+
+      - name: Upload Lumina demo module
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumina-demo-module
+          path: lumina-demo-module.zip
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
