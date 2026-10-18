@@ -1,11 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/media_item.dart';
+import '../services/download_service.dart';
 import '../services/module_episodes.dart';
 import '../services/module_state_service.dart';
 import '../services/modules_service.dart';
 import '../services/synthetiq_module_runtime.dart';
 import 'module_player_screen.dart';
+import 'player_screen.dart';
 
 const int _episodesPerRange = 100;
 
@@ -53,6 +58,13 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
   ModuleHistoryEntry? _last;
   bool _descriptionOpen = false;
 
+  // DUB availability per episode href. Modules do not list which episodes are
+  // dubbed, so in DUB mode the visible episodes are asked for a dub stream.
+  final Map<String, bool> _dubOk = {};
+  int _probeToken = 0;
+  int _probeDone = 0;
+  int _probeTotal = 0;
+
   @override
   void initState() {
     super.initState();
@@ -61,8 +73,195 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
 
   @override
   void dispose() {
+    _probeToken++;
     _numberController.dispose();
     super.dispose();
+  }
+
+  // ------------------------------------------------------------------ dub
+
+  /// What the module itself says about dub availability, if anything.
+  bool? _declaredDub(dynamic episode) {
+    if (episode is! Map) return null;
+    for (final key in const ['hasDub', 'dub', 'dubbed', 'isDubbed', 'dubAvailable']) {
+      final raw = episode[key];
+      if (raw is bool) return raw;
+      if (raw is num) return raw != 0;
+      if (raw is String) {
+        final t = raw.trim().toLowerCase();
+        if (t == 'true' || t == 'yes' || t == '1') return true;
+        if (t == 'false' || t == 'no' || t == '0') return false;
+      }
+    }
+    for (final key in const ['audio', 'audios', 'languages']) {
+      final raw = episode[key];
+      if (raw == null) continue;
+      final text = raw.toString().trim().toLowerCase();
+      if (text.isEmpty) continue;
+      return text.contains('dub');
+    }
+    return null;
+  }
+
+  /// true = dubbed, false = not dubbed, null = not known yet.
+  bool? _dubStatus(EpisodeInfo info) =>
+      _dubOk[info.href] ?? _declaredDub(_episodes[info.index]);
+
+  bool get _probing => _probeDone < _probeTotal;
+
+  /// The episodes whose dub status matters right now: the open range, or the
+  /// ones matching the number search.
+  List<EpisodeInfo> _probeTargets() {
+    final season = _inSeason(_season);
+    final query = _numberController.text.trim();
+    if (query.isNotEmpty) {
+      return season.where((e) => e.number.toString().contains(query)).take(40).toList();
+    }
+    final start = _range * _episodesPerRange;
+    if (start >= season.length) return const [];
+    final end = start + _episodesPerRange > season.length
+        ? season.length
+        : start + _episodesPerRange;
+    return season.sublist(start, end);
+  }
+
+  Future<void> _ensureDub() async {
+    final token = ++_probeToken;
+    if (_mode != 'dub' || _episodes.isEmpty) {
+      if (mounted && _probeTotal != 0) {
+        setState(() {
+          _probeDone = 0;
+          _probeTotal = 0;
+        });
+      }
+      return;
+    }
+    final pending = _probeTargets()
+        .where((e) => e.href.isNotEmpty && _dubStatus(e) == null)
+        .toList();
+    if (!mounted) return;
+    setState(() {
+      _probeDone = 0;
+      _probeTotal = pending.length;
+    });
+    if (pending.isEmpty) return;
+
+    var next = 0;
+    Future<void> worker() async {
+      while (token == _probeToken && next < pending.length) {
+        final info = pending[next++];
+        bool? ok;
+        try {
+          final value = await widget.runtime
+              .call(widget.module, 'extractStreamUrl', [info.href, 'dub', false])
+              .timeout(const Duration(seconds: 30));
+          ok = !parseModuleStreams(value).isEmpty;
+        } catch (_) {
+          // A network error is not proof the dub is missing: leave it unknown.
+          ok = null;
+        }
+        if (token != _probeToken || !mounted) return;
+        final result = ok;
+        setState(() {
+          if (result != null) _dubOk[info.href] = result;
+          _probeDone++;
+        });
+      }
+    }
+
+    await Future.wait([worker(), worker(), worker()]);
+  }
+
+  // ------------------------------------------------------------- download
+
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<ModuleStream?> _pickQuality(ModuleStreamBundle bundle) {
+    return showModalBottomSheet<ModuleStream>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Download quality', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final stream in bundle.streams)
+                    ListTile(
+                      title: Text(stream.label),
+                      onTap: () => Navigator.pop(sheetContext, stream),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _download(EpisodeInfo info) async {
+    final downloads = context.read<DownloadService>();
+    final mode = _mode;
+    _snack('Preparing episode ${info.number}…');
+    try {
+      final value = await widget.runtime
+          .call(widget.module, 'extractStreamUrl', [info.href, mode, false])
+          .timeout(const Duration(seconds: 45));
+      final bundle = parseModuleStreams(value);
+      if (bundle.isEmpty) {
+        _snack('The module did not return a downloadable stream for episode ${info.number}.');
+        return;
+      }
+      var stream = bundle.streams.first;
+      if (bundle.streams.length > 1) {
+        if (!mounted) return;
+        final picked = await _pickQuality(bundle);
+        if (picked == null) return;
+        stream = picked;
+      }
+      final episode = _episodes[info.index];
+      var episodeTitle = moduleText(episode, const ['title', 'name']);
+      if (episodeTitle.isEmpty) episodeTitle = 'Episode ${info.number}';
+      await downloads.start(
+        moduleId: widget.module.id,
+        titleHref: _href,
+        title: _title,
+        image: _poster,
+        episodeHref: info.href,
+        episodeTitle: episodeTitle,
+        episodeNumber: info.number,
+        mode: mode,
+        quality: stream.label,
+        url: stream.url,
+        headers: stream.headers,
+      );
+      _snack('Downloading episode ${info.number}. Progress is on the Downloads tab.');
+    } catch (e) {
+      _snack('Could not start the download: $e');
+    }
+  }
+
+  void _playDownloaded(DownloadItem item) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => PlayerScreen(
+        item: MediaItem(
+          id: 'download:${item.id}',
+          title: '$_title · ${item.episodeTitle}',
+          path: item.filePath,
+          type: MediaType.video,
+          dateAdded: DateTime.fromMillisecondsSinceEpoch(item.createdAt),
+        ),
+      ),
+    ));
   }
 
   String _field(dynamic details, List<String> keys) {
@@ -115,6 +314,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
 
       if (!mounted) return;
       setState(() => _loading = false);
+      unawaited(_ensureDub());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -175,12 +375,16 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
   void _setMode(String mode) {
     setState(() => _mode = mode);
     _lastMode = mode;
+    unawaited(_ensureDub());
   }
 
   // ------------------------------------------------------------------ build
 
   @override
   Widget build(BuildContext context) {
+    // Watched marks and download progress repaint the episode grid.
+    final stateService = context.watch<ModuleStateService>();
+    final downloads = context.watch<DownloadService>();
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -193,7 +397,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _error != null
               ? _errorView()
-              : _content(context),
+              : _content(context, stateService, downloads),
     );
   }
 
@@ -215,11 +419,15 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     );
   }
 
-  Widget _content(BuildContext context) {
+  Widget _content(
+    BuildContext context,
+    ModuleStateService stateService,
+    DownloadService downloads,
+  ) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final width = MediaQuery.of(context).size.width;
-    final columns = ((width - 32) / 58).floor().clamp(4, 14).toInt();
+    final columns = ((width - 32) / 88).floor().clamp(3, 8).toInt();
 
     final seasonEpisodes = _inSeason(_season);
     final ranges = <List<EpisodeInfo>>[
@@ -231,9 +439,14 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     ];
     final rangeIndex = ranges.isEmpty ? 0 : _range.clamp(0, ranges.length - 1).toInt();
     final query = _numberController.text.trim();
-    final visible = query.isNotEmpty
+    final candidates = query.isNotEmpty
         ? seasonEpisodes.where((e) => e.number.toString().contains(query)).toList()
         : (ranges.isEmpty ? <EpisodeInfo>[] : ranges[rangeIndex]);
+    // In DUB mode only episodes that really have a dub are listed.
+    final dubMode = _mode == 'dub';
+    final visible = dubMode
+        ? candidates.where((e) => _dubStatus(e) == true).toList()
+        : candidates;
 
     String rangeLabel(List<EpisodeInfo> r) => '${r.first.number}-${r.last.number}';
 
@@ -360,6 +573,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                                 _range = value;
                                 _numberController.clear();
                               });
+                              unawaited(_ensureDub());
                             },
                           )
                         else if (ranges.isNotEmpty)
@@ -371,7 +585,10 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                       child: TextField(
                         controller: _numberController,
                         keyboardType: TextInputType.number,
-                        onChanged: (_) => setState(() {}),
+                        onChanged: (_) {
+                          setState(() {});
+                          unawaited(_ensureDub());
+                        },
                         decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search),
                           hintText: 'Number of Ep',
@@ -386,6 +603,29 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
             ),
           ),
         ),
+        if (dubMode)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _probing
+                        ? 'Checking which episodes are dubbed… $_probeDone/$_probeTotal'
+                        : '${visible.length} dubbed episode${visible.length == 1 ? '' : 's'} here',
+                    style: textTheme.bodySmall,
+                  ),
+                  if (_probing) ...[
+                    const SizedBox(height: 6),
+                    LinearProgressIndicator(
+                      value: _probeTotal == 0 ? null : _probeDone / _probeTotal,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
           sliver: visible.isEmpty
@@ -393,7 +633,15 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                   child: Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Center(
-                      child: Text(query.isEmpty ? 'No episodes.' : 'No episode matches "$query".'),
+                      child: Text(
+                        _probing
+                            ? 'Checking…'
+                            : dubMode
+                                ? (query.isEmpty
+                                    ? 'No dubbed episodes in this range.'
+                                    : 'No dubbed episode matches "$query".')
+                                : (query.isEmpty ? 'No episodes.' : 'No episode matches "$query".'),
+                      ),
                     ),
                   ),
                 )
@@ -402,10 +650,11 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                     crossAxisCount: columns,
                     mainAxisSpacing: 8,
                     crossAxisSpacing: 8,
-                    childAspectRatio: 1.9,
+                    childAspectRatio: 2.1,
                   ),
                   delegate: SliverChildBuilderDelegate(
-                    (context, index) => _episodeTile(visible[index], scheme),
+                    (context, index) =>
+                        _episodeTile(visible[index], scheme, stateService, downloads),
                     childCount: visible.length,
                   ),
                 ),
@@ -464,32 +713,105 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
-      onPressed: () => setState(() {
-        _season = season;
-        _range = 0;
-        _numberController.clear();
-      }),
+      onPressed: () {
+        setState(() {
+          _season = season;
+          _range = 0;
+          _numberController.clear();
+        });
+        unawaited(_ensureDub());
+      },
       child: Text(seasonLabel(season), style: const TextStyle(fontWeight: FontWeight.w600)),
     );
   }
 
-  Widget _episodeTile(EpisodeInfo info, ColorScheme scheme) {
+  Widget _downloadButton(EpisodeInfo info, DownloadService downloads, ColorScheme scheme) {
+    final item = downloads.find(widget.module.id, info.href, _mode);
+    Widget icon;
+    VoidCallback onTap;
+    String tooltip;
+    if (item != null && item.state == DownloadState.downloading) {
+      icon = SizedBox(
+        width: 16,
+        height: 16,
+        child: CircularProgressIndicator(value: item.progress, strokeWidth: 2),
+      );
+      onTap = () => downloads.remove(item.id);
+      tooltip = 'Cancel download';
+    } else if (item != null && item.state == DownloadState.done) {
+      icon = Icon(Icons.download_done, size: 18, color: scheme.primary);
+      onTap = () => _playDownloaded(item);
+      tooltip = 'Play downloaded episode';
+    } else {
+      icon = const Icon(Icons.download_outlined, size: 18);
+      onTap = () => _download(info);
+      tooltip = 'Download episode';
+    }
+    return SizedBox(
+      width: 34,
+      height: 34,
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        tooltip: tooltip,
+        icon: icon,
+        onPressed: onTap,
+      ),
+    );
+  }
+
+  Widget _episodeTile(
+    EpisodeInfo info,
+    ColorScheme scheme,
+    ModuleStateService stateService,
+    DownloadService downloads,
+  ) {
     final isLast = _last != null && _last!.episodeHref == info.href;
+    final watched = stateService.isWatched(widget.module.id, _href, info.href);
+    // Watched episodes are dimmed and get a check mark; the one you stopped on
+    // keeps the strong highlight.
+    final dim = watched && !isLast;
+    final textColor = isLast
+        ? scheme.onSurface
+        : (dim ? scheme.onSurfaceVariant.withAlpha(110) : scheme.onSurfaceVariant);
     return Material(
-      color: isLast ? scheme.onSurface.withAlpha(70) : scheme.surfaceContainerHighest,
+      color: isLast
+          ? scheme.onSurface.withAlpha(70)
+          : (dim
+              ? scheme.surfaceContainerHighest.withAlpha(110)
+              : scheme.surfaceContainerHighest),
       borderRadius: BorderRadius.circular(6),
       child: InkWell(
         borderRadius: BorderRadius.circular(6),
         onTap: () => _play(info),
-        child: Center(
-          child: Text(
-            '${info.number}',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: isLast ? FontWeight.w800 : FontWeight.w600,
-              color: isLast ? scheme.onSurface : scheme.onSurfaceVariant,
+        onLongPress: () {
+          stateService.toggleWatched(widget.module.id, _href, info.href);
+          _snack(watched
+              ? 'Episode ${info.number} marked as not watched.'
+              : 'Episode ${info.number} marked as watched.');
+        },
+        child: Row(
+          children: [
+            Expanded(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (watched) ...[
+                    Icon(Icons.check_circle, size: 14, color: scheme.primary.withAlpha(dim ? 150 : 255)),
+                    const SizedBox(width: 4),
+                  ],
+                  Text(
+                    '${info.number}',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: isLast ? FontWeight.w800 : FontWeight.w600,
+                      color: textColor,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
+            _downloadButton(info, downloads, scheme),
+          ],
         ),
       ),
     );
