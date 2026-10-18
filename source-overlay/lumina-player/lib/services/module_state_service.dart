@@ -106,6 +106,9 @@ class ModuleHistoryEntry {
 class ModuleStateService extends ChangeNotifier {
   final Map<String, ModuleFavourite> _favourites = {};
   final Map<String, ModuleHistoryEntry> _history = {};
+  // Episodes the user has finished (or watched past 90 %), as
+  // "moduleId|titleHref|episodeHref" keys.
+  final Set<String> _watched = <String>{};
   String? _selectedModuleId;
   bool _loaded = false;
   bool _disposed = false;
@@ -151,6 +154,12 @@ class ModuleStateService extends ChangeNotifier {
               }
             }
           }
+          final watched = data['watched'];
+          if (watched is List) {
+            for (final w in watched) {
+              if (w is String && w.isNotEmpty) _watched.add(w);
+            }
+          }
           final hist = data['history'];
           if (hist is List) {
             for (final h in hist) {
@@ -179,6 +188,7 @@ class ModuleStateService extends ChangeNotifier {
           'selected': _selectedModuleId,
           'favourites': _favourites.values.map((e) => e.toJson()).toList(),
           'history': _history.values.map((e) => e.toJson()).toList(),
+          'watched': _watched.toList(),
         }),
       );
     } catch (e) {
@@ -225,6 +235,30 @@ class ModuleStateService extends ChangeNotifier {
         ..sort((a, b) => a.updatedAt.compareTo(b.updatedAt));
       _history.remove(oldest.first.key);
     }
+    _notify();
+    await _persist();
+  }
+
+  String _watchedKey(String moduleId, String titleHref, String episodeHref) =>
+      '$moduleId|$titleHref|$episodeHref';
+
+  bool isWatched(String moduleId, String titleHref, String episodeHref) =>
+      episodeHref.isNotEmpty &&
+      _watched.contains(_watchedKey(moduleId, titleHref, episodeHref));
+
+  Future<void> markWatched(String moduleId, String titleHref, String episodeHref) async {
+    if (episodeHref.isEmpty) return;
+    if (!_watched.add(_watchedKey(moduleId, titleHref, episodeHref))) return;
+    if (_watched.length > 5000) _watched.remove(_watched.first);
+    _notify();
+    await _persist();
+  }
+
+  /// Lets the user flip the "watched" mark by hand (long-press on an episode).
+  Future<void> toggleWatched(String moduleId, String titleHref, String episodeHref) async {
+    if (episodeHref.isEmpty) return;
+    final key = _watchedKey(moduleId, titleHref, episodeHref);
+    if (!_watched.remove(key)) _watched.add(key);
     _notify();
     await _persist();
   }
