@@ -9,8 +9,8 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-const luminaRepositoryUrl =
-    'https://raw.githubusercontent.com/bamelankur/Lumina-Modules/main/repository.json';
+const synthetiqRepositoryUrl =
+    'https://raw.githubusercontent.com/kas021/Synthetiq-Modules/main/repository.json';
 
 class InstalledModule {
   const InstalledModule({
@@ -126,7 +126,7 @@ class ModulesService extends ChangeNotifier {
     error = null;
     notifyListeners();
     try {
-      final response = await http.get(Uri.parse(luminaRepositoryUrl)).timeout(
+      final response = await http.get(Uri.parse(synthetiqRepositoryUrl)).timeout(
         const Duration(seconds: 25),
       );
       if (response.statusCode != 200) {
