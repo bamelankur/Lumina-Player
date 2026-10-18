@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
 
@@ -483,6 +484,7 @@ class _ModuleVideoPlayer extends StatefulWidget {
 class _ModuleVideoPlayerState extends State<_ModuleVideoPlayer> {
   late final VideoPlayerController _controller;
   Object? _error;
+  String? _probe;
 
   @override
   void initState() {
@@ -493,7 +495,31 @@ class _ModuleVideoPlayerState extends State<_ModuleVideoPlayer> {
         _controller.play();
       }).catchError((Object error) {
         if (mounted) setState(() => _error = error);
+        _runProbe();
       });
+  }
+
+  /// Playback failed: fetch the first bytes ourselves so the screen can show
+  /// whether the problem is the network, the server's answer or the file.
+  Future<void> _runProbe() async {
+    final lines = <String>['URL: ${widget.url}'];
+    try {
+      final res = await http
+          .get(Uri.parse(widget.url), headers: {...widget.headers, 'Range': 'bytes=0-1023'})
+          .timeout(const Duration(seconds: 15));
+      final bytes = res.bodyBytes;
+      final marker = bytes.length >= 8 ? String.fromCharCodes(bytes.sublist(4, 8)) : '(too short)';
+      lines
+        ..add('HTTP status: ${res.statusCode}')
+        ..add('Content-Type: ${res.headers['content-type']}')
+        ..add('Content-Length: ${res.headers['content-length']}')
+        ..add('Content-Range: ${res.headers['content-range']}')
+        ..add('Bytes received: ${bytes.length}')
+        ..add('File marker (bytes 4-8, MP4 should say "ftyp"): $marker');
+    } catch (e) {
+      lines.add('Network test failed: $e');
+    }
+    if (mounted) setState(() => _probe = lines.join('\n'));
   }
 
   @override
@@ -508,7 +534,13 @@ class _ModuleVideoPlayerState extends State<_ModuleVideoPlayer> {
       appBar: AppBar(title: Text(widget.title)),
       body: Center(
         child: _error != null
-            ? Padding(padding: const EdgeInsets.all(20), child: Text('Playback failed: $_error'))
+            ? SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: SelectableText(
+                  'Playback failed: $_error\n\n'
+                  '${_probe ?? 'Running network test…'}',
+                ),
+              )
             : !_controller.value.isInitialized
                 ? const CircularProgressIndicator()
                 : AspectRatio(
