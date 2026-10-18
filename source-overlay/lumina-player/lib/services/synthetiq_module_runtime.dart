@@ -8,6 +8,8 @@ import 'modules_service.dart';
 /// Executes a locally installed Synthetiq Contract V4 module in a QuickJS
 /// context. Each provider gets its own engine so globals/caches do not collide.
 class SynthetiqModuleRuntime {
+  static Future<void>? _libraryInit;
+
   final Map<String, JsEngine> _engines = {};
   final Map<String, Future<JsEngine>> _loading = {};
 
@@ -49,7 +51,7 @@ class SynthetiqModuleRuntime {
       throw const FormatException('Module entry exceeds the 2 MB execution limit.');
     }
 
-    await LibFjs.init();
+    await (_libraryInit ??= LibFjs.init());
     final engine = await JsEngine.create(
       builtins: JsBuiltinOptions.web(),
     );
