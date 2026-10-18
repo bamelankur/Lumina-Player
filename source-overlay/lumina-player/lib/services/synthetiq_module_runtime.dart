@@ -5,9 +5,9 @@ import 'package:fjs/fjs.dart';
 
 import 'modules_service.dart';
 
-/// Executes a locally installed Synthetiq module in an isolated QuickJS
+/// Executes a locally installed Lumina-compatible module in an isolated QuickJS
 /// context. Each provider gets its own engine so globals/caches do not collide.
-class SynthetiqModuleRuntime {
+class LuminaModuleRuntime {
   static Future<void>? _libraryInit;
 
   final Map<String, JsEngine> _engines = {};
@@ -36,14 +36,14 @@ class SynthetiqModuleRuntime {
     if (metadata is! Map) throw const FormatException('Module metadata is invalid.');
     final moduleSystem = '${metadata['moduleSystem'] ?? 'synthetiq'}'.toLowerCase();
     final contract = int.tryParse('${metadata['contractVersion'] ?? metadata['formatVersion'] ?? 0}') ?? 0;
-    // Lumina-native modules use our small, stable API. Existing Synthetiq
+    // Lumina-native modules use our small, stable API. Existing legacy module format
     // modules continue to use the published Contract V3+ handler contract.
     if (moduleSystem == 'lumina') {
       if (contract < 1) {
         throw FormatException('Unsupported Lumina module contract $contract. Lumina requires contract V1 or later.');
       }
     } else if (contract < 3) {
-      throw FormatException('Unsupported Synthetiq module contract $contract. Lumina requires Synthetiq Contract V3 or later.');
+      throw FormatException('Unsupported legacy module contract $contract. Lumina requires Synthetiq Contract V3 or later.');
     }
     final contentType = '${metadata['contentType'] ?? 'video'}'.toLowerCase();
     if (!const {'video', 'image', 'text', 'music'}.contains(contentType)) {
@@ -68,7 +68,7 @@ class SynthetiqModuleRuntime {
     );
     try {
       await engine.initWithoutBridge();
-      // Synthetiq modules use fetchv2(url, headers, method, body).
+      // Legacy modules may use fetchv2(url, headers, method, body).
       // Adapt that contract to the runtime's Fetch API.
       await engine.eval(
         source: JsCode.code(r'''
