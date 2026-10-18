@@ -272,8 +272,8 @@ class ModulesService extends ChangeNotifier {
     final root = await _root();
     final destination = Directory(p.join(root.path, id));
     final staging = Directory(p.join(root.path, '.install-$id-${DateTime.now().microsecondsSinceEpoch}'));
-    final metadataSlash = metadataPath.indexOf('/');
-    final zipRootPrefix = metadataSlash >= 0 ? metadataPath.substring(0, metadataSlash + 1) : '';
+    final manifestDir = p.dirname(metadataPath);
+    final zipRootPrefix = manifestDir == '.' ? '' : '$manifestDir/';
     await staging.create(recursive: true);
     try {
       for (final entry in extracted.entries) {
