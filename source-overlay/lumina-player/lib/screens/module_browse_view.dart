@@ -48,34 +48,7 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
     for (final module in modules) {
       if (!mounted) return;
       try {
-        dynamic value;
-        List<dynamic> list;
-        if (_query.text.trim().isEmpty) {
-          try {
-            value = await _runtime.call(module, 'discoveryHome');
-          } catch (_) {
-            value = null;
-          }
-          if (value is Map && value['sections'] is List) {
-            list = (value['sections'] as List)
-                .whereType<Map>()
-                .expand((section) => section['items'] is List ? section['items'] as List : const <dynamic>[])
-                .toList();
-          } else if (value is List) {
-            list = value;
-          } else {
-            try {
-              value = await _runtime.call(module, 'extractHome');
-              list = value is List ? value : (value is Map && value['items'] is List ? value['items'] as List : const <dynamic>[]);
-            } catch (_) {
-              value = await _runtime.call(module, 'searchResults', ['']);
-              list = value is List ? value : const [];
-            }
-          }
-        } else {
-          value = await _runtime.call(module, 'searchResults', [_query.text.trim()]);
-          list = value is List ? value : const [];
-        }
+        final list = await loadModuleItems(_runtime, module, _query.text);
         _results[module.id] = list;
         if (list.isEmpty) _errors[module.id] = 'No results returned.';
       } catch (e) {
@@ -86,90 +59,8 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
     if (mounted) setState(() => _searching = false);
   }
 
-  Future<void> _openTitle(InstalledModule module, dynamic card) async {
-    final href = _string(card, ['href', 'url', 'id', 'link']);
-    if (href.isEmpty) {
-      _notice('This result does not include a title reference.');
-      return;
-    }
-    try {
-      dynamic details;
-      try {
-        details = await _runtime.call(module, 'extractDetails', [href]);
-      } catch (_) {
-        details = card;
-      }
-      final title = _string(details, ['title', 'name']).isNotEmpty
-          ? _string(details, ['title', 'name'])
-          : _string(card, ['title', 'name']);
-      final episodeValue = await _runtime.call(module, 'extractEpisodes', [href]);
-      final episodes = episodeValue is List ? episodeValue : const [];
-      if (!mounted) return;
-      if (episodes.isEmpty) {
-        _notice('No episodes were returned for $title.');
-        return;
-      }
-      final chosen = await showModalBottomSheet<dynamic>(
-        context: context,
-        isScrollControlled: true,
-        builder: (context) => SafeArea(
-          child: SizedBox(
-            height: MediaQuery.of(context).size.height * 0.7,
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(title, style: Theme.of(context).textTheme.titleLarge),
-                ),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: episodes.length,
-                    itemBuilder: (context, index) {
-                      final ep = episodes[index];
-                      final label = _string(ep, ['title', 'name']).isNotEmpty
-                          ? _string(ep, ['title', 'name'])
-                          : 'Episode ${index + 1}';
-                      final season = _string(ep, ['season']);
-                      return ListTile(
-                        leading: const Icon(Icons.play_circle_outline),
-                        title: Text(label),
-                        subtitle: season.isEmpty ? null : Text('Season $season'),
-                        onTap: () => Navigator.pop(context, ep),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-      if (chosen == null || !mounted) return;
-      final episodeHref = _string(chosen, ['href', 'url', 'id']);
-      if (episodeHref.isEmpty) {
-        _notice('The selected episode has no playable reference.');
-        return;
-      }
-      final stream = await _runtime.call(module, 'extractStreamUrl', [episodeHref, 'sub', false]);
-      final streamUrl = _findStreamUrl(stream);
-      if (streamUrl.isEmpty) {
-        _notice('The module did not return a direct playable URL.');
-        return;
-      }
-      final headers = _findHeaders(stream);
-      if (!mounted) return;
-      await Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => _ModuleVideoPlayer(title: title, url: streamUrl, headers: headers),
-      ));
-    } catch (e) {
-      _notice('Could not open title: $e');
-    }
-  }
-
-  void _notice(String text) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-  }
+  Future<void> _openTitle(InstalledModule module, dynamic card) =>
+      openModuleTitle(context, _runtime, module, card);
 
   @override
   Widget build(BuildContext context) {
@@ -230,9 +121,9 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
                         ),
                       for (final card in (_results[module.id] ?? const <dynamic>[]))
                         ListTile(
-                          leading: _image(_string(card, ['image', 'poster', 'posterUrl', 'imageUrl'])),
-                          title: Text(_string(card, ['title', 'name']).isEmpty ? 'Untitled' : _string(card, ['title', 'name'])),
-                          subtitle: Text(_string(card, ['year', 'description'])),
+                          leading: moduleImage(moduleString(card, ['image', 'poster', 'posterUrl', 'imageUrl'])),
+                          title: Text(moduleString(card, ['title', 'name']).isEmpty ? 'Untitled' : moduleString(card, ['title', 'name'])),
+                          subtitle: Text(moduleString(card, ['year', 'description'])),
                           trailing: const Icon(Icons.chevron_right),
                           onTap: () => _openTitle(module, card),
                         ),
@@ -245,7 +136,277 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
   }
 }
 
-String _string(dynamic value, List<String> keys) {
+/// Loads the list of cards for one module. An empty [query] loads the module's
+/// own home feed; otherwise it runs the module's search.
+Future<List<dynamic>> loadModuleItems(
+  LuminaModuleRuntime runtime,
+  InstalledModule module,
+  String query,
+) async {
+  final q = query.trim();
+  dynamic value;
+  if (q.isNotEmpty) {
+    value = await runtime.call(module, 'searchResults', [q]);
+    return value is List ? value : const <dynamic>[];
+  }
+  try {
+    value = await runtime.call(module, 'discoveryHome');
+  } catch (_) {
+    value = null;
+  }
+  if (value is Map && value['sections'] is List) {
+    return (value['sections'] as List)
+        .whereType<Map>()
+        .expand((section) =>
+            section['items'] is List ? section['items'] as List : const <dynamic>[])
+        .toList();
+  }
+  if (value is List) return value;
+  try {
+    value = await runtime.call(module, 'extractHome');
+    if (value is List) return value;
+    if (value is Map && value['items'] is List) return value['items'] as List;
+    return const <dynamic>[];
+  } catch (_) {
+    value = await runtime.call(module, 'searchResults', ['']);
+    return value is List ? value : const <dynamic>[];
+  }
+}
+
+/// Opens a title card: details, episode list, then the player.
+Future<void> openModuleTitle(
+  BuildContext context,
+  LuminaModuleRuntime runtime,
+  InstalledModule module,
+  dynamic card,
+) async {
+  void notice(String text) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  final href = moduleString(card, ['href', 'url', 'id', 'link']);
+  if (href.isEmpty) {
+    notice('This result does not include a title reference.');
+    return;
+  }
+  try {
+    dynamic details;
+    try {
+      details = await runtime.call(module, 'extractDetails', [href]);
+    } catch (_) {
+      details = card;
+    }
+    final title = moduleString(details, ['title', 'name']).isNotEmpty
+        ? moduleString(details, ['title', 'name'])
+        : moduleString(card, ['title', 'name']);
+    final episodeValue = await runtime.call(module, 'extractEpisodes', [href]);
+    final episodes = episodeValue is List ? episodeValue : const [];
+    if (!context.mounted) return;
+    if (episodes.isEmpty) {
+      notice('No episodes were returned for $title.');
+      return;
+    }
+    final chosen = await showModalBottomSheet<dynamic>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.of(sheetContext).size.height * 0.7,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(title, style: Theme.of(sheetContext).textTheme.titleLarge),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: episodes.length,
+                  itemBuilder: (_, index) {
+                    final ep = episodes[index];
+                    final label = moduleString(ep, ['title', 'name']).isNotEmpty
+                        ? moduleString(ep, ['title', 'name'])
+                        : 'Episode ${index + 1}';
+                    final season = moduleString(ep, ['season']);
+                    return ListTile(
+                      leading: const Icon(Icons.play_circle_outline),
+                      title: Text(label),
+                      subtitle: season.isEmpty ? null : Text('Season $season'),
+                      onTap: () => Navigator.pop(sheetContext, ep),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (chosen == null || !context.mounted) return;
+    final episodeHref = moduleString(chosen, ['href', 'url', 'id']);
+    if (episodeHref.isEmpty) {
+      notice('The selected episode has no playable reference.');
+      return;
+    }
+    final stream = await runtime.call(module, 'extractStreamUrl', [episodeHref, 'sub', false]);
+    final streamUrl = _findStreamUrl(stream);
+    if (streamUrl.isEmpty) {
+      notice('The module did not return a direct playable URL.');
+      return;
+    }
+    final headers = _findHeaders(stream);
+    if (!context.mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => _ModuleVideoPlayer(title: title, url: streamUrl, headers: headers),
+    ));
+  } catch (e) {
+    notice('Could not open title: $e');
+  }
+}
+
+/// A single module's own page: its suggested media (home feed) plus a search
+/// box that searches only this module.
+class ModuleHomePage extends StatefulWidget {
+  const ModuleHomePage({super.key, required this.module, required this.runtime});
+
+  final InstalledModule module;
+  final LuminaModuleRuntime runtime;
+
+  @override
+  State<ModuleHomePage> createState() => _ModuleHomePageState();
+}
+
+class _ModuleHomePageState extends State<ModuleHomePage> {
+  final _query = TextEditingController();
+  List<dynamic> _items = const [];
+  bool _loading = true;
+  String? _error;
+  String _shownQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final q = _query.text.trim();
+    setState(() {
+      _loading = true;
+      _error = null;
+      _shownQuery = q;
+    });
+    try {
+      final items = await loadModuleItems(widget.runtime, widget.module, q)
+          .timeout(const Duration(seconds: 30));
+      if (!mounted) return;
+      setState(() {
+        _items = items;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _items = const [];
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.module.name)),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: TextField(
+              controller: _query,
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => _load(),
+              decoration: InputDecoration(
+                hintText: 'Search ${widget.module.name}',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: IconButton(
+                  tooltip: 'Search',
+                  icon: const Icon(Icons.arrow_forward),
+                  onPressed: _load,
+                ),
+                border: const OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _shownQuery.isEmpty ? 'Suggested' : 'Results for "$_shownQuery"',
+                style: theme.textTheme.titleMedium,
+              ),
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('Could not load this module: $_error',
+                                  textAlign: TextAlign.center),
+                              const SizedBox(height: 12),
+                              FilledButton(onPressed: _load, child: const Text('Try again')),
+                            ],
+                          ),
+                        ),
+                      )
+                    : _items.isEmpty
+                        ? Center(
+                            child: Text(_shownQuery.isEmpty
+                                ? 'This module did not suggest anything. Try searching.'
+                                : 'No results.'))
+                        : RefreshIndicator(
+                            onRefresh: _load,
+                            child: ListView.builder(
+                              itemCount: _items.length,
+                              itemBuilder: (context, i) {
+                                final card = _items[i];
+                                final title = moduleString(card, ['title', 'name']);
+                                return ListTile(
+                                  leading: moduleImage(moduleString(
+                                      card, ['image', 'poster', 'posterUrl', 'imageUrl'])),
+                                  title: Text(title.isEmpty ? 'Untitled' : title),
+                                  subtitle: Text(moduleString(card, ['year', 'description']),
+                                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                                  trailing: const Icon(Icons.chevron_right),
+                                  onTap: () =>
+                                      openModuleTitle(context, widget.runtime, widget.module, card),
+                                );
+                              },
+                            ),
+                          ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String moduleString(dynamic value, List<String> keys) {
   if (value is! Map) return value is String ? value : '';
   for (final key in keys) {
     final candidate = value[key];
@@ -298,15 +459,15 @@ Map<String, String> _findHeaders(dynamic value) {
   return {};
 }
 
-Widget _image(String url) {
+Widget moduleImage(String url, {double width = 48, double height = 68}) {
   if (url.startsWith('http://') || url.startsWith('https://')) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
-      child: Image.network(url, width: 48, height: 68, fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => const SizedBox(width: 48, child: Icon(Icons.movie_outlined))),
+      child: Image.network(url, width: width, height: height, fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => SizedBox(width: width, child: const Icon(Icons.movie_outlined))),
     );
   }
-  return const SizedBox(width: 48, child: Icon(Icons.movie_outlined));
+  return SizedBox(width: width, child: const Icon(Icons.movie_outlined));
 }
 
 class _ModuleVideoPlayer extends StatefulWidget {
