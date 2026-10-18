@@ -208,7 +208,7 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
         if (modules.isEmpty)
           const Padding(
             padding: EdgeInsets.all(20),
-            child: Text('No video providers installed. Open Repository, install a Contract V4 video module, then return here.'),
+            child: Text('No video providers installed. Open Repository, install a compatible Synthetiq video module, then return here.'),
           ),
         Expanded(
           child: _results.isEmpty
