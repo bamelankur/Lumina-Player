@@ -7,6 +7,7 @@ import '../services/synthetiq_module_runtime.dart';
 import 'module_poster_card.dart';
 import 'module_browse_view.dart';
 import 'module_player_screen.dart';
+import 'module_section_row.dart';
 
 /// Home: pick a module, search it, flip through its suggested titles in a
 /// carousel (Play / info / favourite), then Continue Watching and more.
@@ -23,6 +24,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _pageController = PageController(viewportFraction: 0.78);
 
   final Map<String, List<dynamic>> _feeds = {};
+  final Map<String, List<ModuleSection>> _sections = {};
   final Map<String, String> _feedErrors = {};
   final Set<String> _loadingFeeds = {};
 
@@ -67,11 +69,12 @@ class _HomeScreenState extends State<HomeScreen> {
       _feedErrors.remove(module.id);
     });
     try {
-      final items = await loadModuleItems(_runtime, module, '')
+      final sections = await loadModuleSections(_runtime, module)
           .timeout(const Duration(seconds: 30));
       if (!mounted) return;
       setState(() {
-        _feeds[module.id] = items;
+        _sections[module.id] = sections;
+        _feeds[module.id] = sections.expand((section) => section.items).toList();
         _loadingFeeds.remove(module.id);
       });
     } catch (e) {
@@ -251,6 +254,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final error = _feedErrors[module.id];
     final hero = items.take(10).toList();
     final extra = items.length > 10 ? items.skip(10).toList() : const <dynamic>[];
+    // Rows the module itself named ("Trending Now", "Latest"...), if any.
+    final rows = (_sections[module.id] ?? const <ModuleSection>[])
+        .where((section) => section.title.trim().isNotEmpty && section.items.isNotEmpty)
+        .toList();
     final watching = state.continueWatching;
     final searching = _searchedQuery.isNotEmpty;
     if (_page >= hero.length && hero.isNotEmpty) _page = 0;
@@ -315,7 +322,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ],
-              if (extra.isNotEmpty) ...[
+              if (rows.isNotEmpty) ...[
+                for (final section in rows)
+                  ModuleSectionRow(
+                    title: section.title,
+                    items: section.items,
+                    onOpen: (card) => _play(module, card),
+                  ),
+              ] else if (extra.isNotEmpty) ...[
                 const SizedBox(height: 24),
                 _sectionTitle(theme, 'More from ${module.name}'),
                 const SizedBox(height: 12),
