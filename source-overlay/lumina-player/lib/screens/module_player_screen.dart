@@ -300,6 +300,14 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   static double _brightness = 1.0;
   static double _volume = 1.0;
 
+  // Android system media volume, driven through MainActivity (see lumina/volume).
+  static const _volumeChannel = MethodChannel('lumina/volume');
+
+  // The last quality and subtitle the user picked. Kept for the app session so
+  // the next episode (and the next player) opens with the same choices.
+  static String? _lastQualityLabel;
+  static String? _lastSubtitleLabel;
+
   VideoPlayerController? _controller;
   late final ModuleStateService _state;
   late int _episodeIndex;
@@ -309,6 +317,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   late String _titleHref;
   late List<dynamic> _episodes;
   String? _switching;
+  bool _systemVolume = false;
   int _lastPositionMs = 0;
   int _streamIndex = 0;
   int _subIndex = -1;
@@ -345,8 +354,15 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     _mode = widget.initialMode;
     _episodeIndex = widget.episodeIndex;
     _bundle = widget.initial;
+    // The player opens in landscape; the Rotate chip still flips to portrait.
+    SystemChrome.setPreferredOrientations(
+      const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+    );
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    unawaited(_syncSystemVolume());
+    _subIndex = _matchSubtitle(_bundle);
     _saveTimer = Timer.periodic(const Duration(seconds: 5), (_) => _saveProgress());
-    _open(0, startAtMs: widget.resumeAtMs);
+    _open(_pickStream(_bundle), startAtMs: widget.resumeAtMs);
   }
 
   @override
@@ -368,6 +384,68 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   void _notice(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  // ----- remembered settings ------------------------------------------------
+
+  int? _heightOf(String label) {
+    final m = RegExp(r'(\d{3,4})').firstMatch(label);
+    return m == null ? null : int.tryParse(m.group(1)!);
+  }
+
+  /// The stream that best matches the quality used last: same label if there
+  /// is one, otherwise the closest resolution, otherwise the first stream.
+  int _pickStream(ModuleStreamBundle bundle) {
+    final wanted = _lastQualityLabel;
+    if (wanted == null || bundle.streams.length < 2) return 0;
+    final exact = bundle.streams.indexWhere((s) => s.label == wanted);
+    if (exact >= 0) return exact;
+    final target = _heightOf(wanted);
+    if (target == null) return 0;
+    var best = 0;
+    var bestDiff = 1 << 30;
+    for (var i = 0; i < bundle.streams.length; i++) {
+      final h = _heightOf(bundle.streams[i].label);
+      if (h == null) continue;
+      final diff = (h - target).abs();
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /// Index of the subtitle track with the label used last, or -1 (off).
+  int _matchSubtitle(ModuleStreamBundle bundle) {
+    final wanted = _lastSubtitleLabel;
+    if (wanted == null) return -1;
+    return bundle.subtitles.indexWhere((s) => s.label == wanted);
+  }
+
+  // ----- system volume --------------------------------------------------------
+
+  Future<void> _syncSystemVolume() async {
+    try {
+      final v = await _volumeChannel.invokeMethod<double>('get');
+      if (v != null) {
+        _volume = v.clamp(0.0, 1.0).toDouble();
+        _systemVolume = true;
+        // The phone's volume now does the work; keep the player at full gain.
+        await _controller?.setVolume(1.0);
+      }
+    } catch (_) {
+      _systemVolume = false;
+    }
+  }
+
+  Future<void> _setSystemVolume(double value) async {
+    try {
+      await _volumeChannel.invokeMethod<void>('set', {'value': value});
+    } catch (_) {
+      _systemVolume = false;
+      await _controller?.setVolume(value);
+    }
   }
 
   String _episodeLabel(int index) {
@@ -394,6 +472,13 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     final duration = c.value.duration.inMilliseconds;
     if (duration <= 0) return;
     final ep = _episodes[_episodeIndex];
+    if (c.value.position.inMilliseconds / duration >= 0.9) {
+      unawaited(_state.markWatched(
+        _module.id,
+        _titleHref,
+        _pick(ep, const ['href', 'url', 'id']),
+      ));
+    }
     unawaited(_state.saveProgress(ModuleHistoryEntry(
       moduleId: _module.id,
       titleHref: _titleHref,
@@ -435,7 +520,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
         await next.seekTo(Duration(milliseconds: startAtMs));
       }
       await next.setPlaybackSpeed(_speed);
-      await next.setVolume(_volume);
+      await next.setVolume(_systemVolume ? 1.0 : _volume);
       next.addListener(_onTick);
       final old = _controller;
       old?.removeListener(_onTick);
@@ -513,9 +598,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       }
       _bundle = bundle;
       _episodeIndex = index;
-      _subIndex = -1;
+      _subIndex = _matchSubtitle(bundle);
       _lastPositionMs = 0;
-      await _open(0);
+      await _open(_pickStream(bundle));
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
@@ -538,8 +623,8 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       }
       _mode = mode;
       _bundle = bundle;
-      _subIndex = -1;
-      await _open(0, startAtMs: position);
+      _subIndex = _matchSubtitle(bundle);
+      await _open(_pickStream(bundle), startAtMs: position);
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
@@ -552,6 +637,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     if (c == null) return;
     if (index < 0 || index >= _bundle.subtitles.length) {
       await c.setClosedCaptionFile(null);
+      _lastSubtitleLabel = null;
       if (mounted) setState(() => _subIndex = -1);
       return;
     }
@@ -570,6 +656,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       final ClosedCaptionFile file =
           lower.contains('.srt') ? SubRipCaptionFile(res.body) : WebVTTCaptionFile(res.body);
       await c.setClosedCaptionFile(Future<ClosedCaptionFile>.value(file));
+      _lastSubtitleLabel = sub.label;
       if (mounted) setState(() => _subIndex = index);
     } catch (e) {
       _notice('Could not load subtitles: $e');
@@ -599,6 +686,11 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   }
 
   Future<void> _onEnded() async {
+    await _state.markWatched(
+      _module.id,
+      _titleHref,
+      _pick(_episodes[_episodeIndex], const ['href', 'url', 'id']),
+    );
     final key = '${_module.id}|${_titleHref}';
     await _state.removeHistory(key);
     if (_episodeIndex + 1 < _episodes.length) {
@@ -708,6 +800,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
         for (var i = 0; i < _bundle.streams.length; i++)
           _Option(_bundle.streams[i].label, i == _streamIndex, () {
             if (i == _streamIndex) return;
+            _lastQualityLabel = _bundle.streams[i].label;
             _open(i, startAtMs: _controller?.value.position.inMilliseconds ?? 0);
           }),
       ]);
@@ -772,9 +865,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
         throw StateError('${_module.name} did not return a playable link.');
       }
       _bundle = bundle;
-      _subIndex = -1;
+      _subIndex = _matchSubtitle(bundle);
       setState(() => _switching = null);
-      await _open(0, startAtMs: position);
+      await _open(_pickStream(bundle), startAtMs: position);
     } catch (e) {
       if (!mounted) return;
       setState(() => _switching = null);
@@ -839,9 +932,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       _episodes = newEpisodes;
       _episodeIndex = index;
       _bundle = bundle;
-      _subIndex = -1;
+      _subIndex = _matchSubtitle(bundle);
       setState(() => _switching = null);
-      await _open(0, startAtMs: position);
+      await _open(_pickStream(bundle), startAtMs: position);
     } catch (e) {
       if (!mounted) return;
       setState(() => _switching = null);
@@ -858,6 +951,12 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     _dragKind = left ? 'brightness' : 'volume';
     _dragBase = left ? _brightness : _volume;
     _dragStartY = details.localPosition.dy;
+    if (!left) {
+      // The hardware volume keys may have moved the level since last time.
+      _syncSystemVolume().then((_) {
+        if (_dragKind == 'volume') _dragBase = _volume;
+      });
+    }
   }
 
   void _onDragUpdate(DragUpdateDetails details, Size size) {
@@ -869,7 +968,11 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       _brightness = value;
     } else {
       _volume = value;
-      _controller?.setVolume(value);
+      if (_systemVolume) {
+        unawaited(_setSystemVolume(value));
+      } else {
+        _controller?.setVolume(value);
+      }
     }
     _showHud(kind, value);
   }
@@ -1033,11 +1136,34 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                   child: _controls((c != null && c.value.isInitialized) ? c : null),
                 ),
               ),
+              _nextEpisodePill(c),
               if (_hudText != null) _hud(),
               if (_switching != null) _switchingOverlay(),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// "Next episode" button that appears for the last 90 seconds (or once the
+  /// episode ends), whether or not the controls are showing.
+  Widget _nextEpisodePill(VideoPlayerController? c) {
+    final hasNext = _episodeIndex + 1 < _episodes.length;
+    if (!hasNext || c == null || !c.value.isInitialized || _switching != null) {
+      return const SizedBox.shrink();
+    }
+    final remaining = c.value.duration - c.value.position;
+    if (c.value.duration <= Duration.zero || remaining > const Duration(seconds: 90)) {
+      return const SizedBox.shrink();
+    }
+    return Positioned(
+      right: 24,
+      bottom: _controlsVisible ? 150 : 56,
+      child: FilledButton.icon(
+        onPressed: () => _changeEpisode(_episodeIndex + 1),
+        icon: const Icon(Icons.skip_next),
+        label: const Text('Next episode'),
       ),
     );
   }
@@ -1087,6 +1213,12 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                       ),
                     ],
                   ),
+                ),
+                IconButton(
+                  color: Colors.white,
+                  tooltip: 'Switch module',
+                  icon: const Icon(Icons.swap_horiz),
+                  onPressed: _showModules,
                 ),
               ],
             ),
@@ -1152,7 +1284,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                   child: Row(
                     children: [
-                      _chip(Icons.swap_horiz, 'Switch module', _showModules),
+                      if (hasNext)
+                        _chip(Icons.skip_next, 'Next episode',
+                            () => _changeEpisode(_episodeIndex + 1)),
                       _chip(Icons.record_voice_over, _mode == 'sub' ? 'Sub' : 'Dub', _showAudio),
                       _chip(
                         Icons.hd,
