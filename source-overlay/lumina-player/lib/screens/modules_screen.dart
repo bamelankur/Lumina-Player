@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/modules_service.dart';
+import 'module_browse_view.dart';
 
 class ModulesScreen extends StatefulWidget {
   const ModulesScreen({super.key});
@@ -99,6 +100,7 @@ class _ModulesScreenState extends State<ModulesScreen> {
                   segments: const [
                     ButtonSegment(value: 0, label: Text('Installed')),
                     ButtonSegment(value: 1, label: Text('Repository')),
+                    ButtonSegment(value: 2, label: Text('Browse')),
                   ],
                   selected: {_tab},
                   onSelectionChanged: (value) => setState(() => _tab = value.first),
@@ -124,7 +126,9 @@ class _ModulesScreenState extends State<ModulesScreen> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           child: Text(
-            'ZIP import and repository downloads are supported. Module JavaScript is stored but not executed yet, so installing a module alone does not enable its catalogue or playback.',
+            _tab == 2
+                ? 'Browse executes installed Contract V4 video modules for search, details, episodes and stream resolution.'
+                : 'Install modules from the repository or import a compatible ZIP. Contract V4 video modules can be searched from Browse.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),
@@ -138,7 +142,9 @@ class _ModulesScreenState extends State<ModulesScreen> {
               ? const Center(child: CircularProgressIndicator())
               : _tab == 0
                   ? _installedList(service)
-                  : _repositoryList(service, installedIds),
+                  : _tab == 1
+                      ? _repositoryList(service, installedIds)
+                      : const ModuleBrowseView(),
         ),
       ],
     );
