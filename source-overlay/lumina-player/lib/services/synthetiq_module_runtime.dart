@@ -34,9 +34,15 @@ class SynthetiqModuleRuntime {
     final metadataFile = File('${module.directory}${Platform.pathSeparator}module.json');
     final metadata = jsonDecode(await metadataFile.readAsString());
     if (metadata is! Map) throw const FormatException('Module metadata is invalid.');
-    final contract = int.tryParse('${metadata['contractVersion'] ?? 0}') ?? 0;
-    if (contract != 4) {
-      throw FormatException('Unsupported module contract $contract. Lumina currently supports Contract V4.');
+    final contract = int.tryParse('${metadata['contractVersion'] ?? metadata['formatVersion'] ?? 0}') ?? 0;
+    // The public Synthetiq module guide documents Contract V3. Support that
+    // published contract and later compatible versions rather than V4 only.
+    if (contract < 3) {
+      throw FormatException('Unsupported module contract $contract. Lumina requires Synthetiq Contract V3 or later.');
+    }
+    final contentType = '${metadata['contentType'] ?? 'video'}'.toLowerCase();
+    if (!const {'video', 'image', 'text', 'music'}.contains(contentType)) {
+      throw FormatException('Unsupported module content type: $contentType');
     }
     final config = metadata['config'] is Map ? metadata['config'] as Map : const {};
     final runtime = config['runtime'] is Map ? config['runtime'] as Map : const {};
@@ -82,14 +88,24 @@ class SynthetiqModuleRuntime {
             details: typeof globalThis.extractDetails === 'function',
             episodes: typeof globalThis.extractEpisodes === 'function',
             stream: typeof globalThis.extractStreamUrl === 'function',
+            chapters: typeof globalThis.extractChapters === 'function',
+            images: typeof globalThis.extractImages === 'function',
+            text: typeof globalThis.extractText === 'function',
             discoveryHome: typeof globalThis.discoveryHome === 'function',
             discoveryFeed: typeof globalThis.discoveryFeed === 'function'
           })
         '''),
       );
       final flags = jsonDecode('${exports.value}');
-      if (flags is! Map || flags['search'] != true) {
-        throw const FormatException('Module did not expose the Contract V4 searchResults function.');
+      final requiredHandlers = switch (contentType) {
+        'video' => const ['search', 'details', 'episodes', 'stream'],
+        'music' => const ['search', 'details', 'episodes', 'stream'],
+        'image' => const ['search', 'details', 'chapters', 'images'],
+        'text' => const ['search', 'details', 'chapters', 'text'],
+        _ => const <String>[],
+      };
+      if (flags is! Map || requiredHandlers.any((name) => flags[name] != true)) {
+        throw FormatException('Module does not expose all required handlers for content type "$contentType".');
       }
       return engine;
     } catch (_) {
