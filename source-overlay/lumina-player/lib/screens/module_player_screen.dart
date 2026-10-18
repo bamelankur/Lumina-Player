@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
 
+import '../services/module_episodes.dart';
 import '../services/module_state_service.dart';
 import '../services/modules_service.dart';
 import '../services/synthetiq_module_runtime.dart';
@@ -160,6 +161,7 @@ Future<void> openModulePlayer(
   required List<dynamic> episodes,
   required int index,
   int resumeAtMs = 0,
+  String mode = 'sub',
 }) async {
   void notice(String text) {
     if (!context.mounted) return;
@@ -173,7 +175,7 @@ Future<void> openModulePlayer(
   }
   try {
     final value = await runtime
-        .call(module, 'extractStreamUrl', [href, 'sub', false])
+        .call(module, 'extractStreamUrl', [href, mode, false])
         .timeout(const Duration(seconds: 45));
     final bundle = parseModuleStreams(value);
     if (bundle.isEmpty) {
@@ -192,6 +194,7 @@ Future<void> openModulePlayer(
         episodeIndex: index,
         initial: bundle,
         resumeAtMs: resumeAtMs,
+        initialMode: mode,
       ),
     ));
   } catch (e) {
@@ -272,6 +275,7 @@ class ModulePlayerScreen extends StatefulWidget {
     required this.episodeIndex,
     required this.initial,
     this.resumeAtMs = 0,
+    this.initialMode = 'sub',
   });
 
   final LuminaModuleRuntime runtime;
@@ -283,6 +287,7 @@ class ModulePlayerScreen extends StatefulWidget {
   final int episodeIndex;
   final ModuleStreamBundle initial;
   final int resumeAtMs;
+  final String initialMode;
 
   @override
   State<ModulePlayerScreen> createState() => _ModulePlayerScreenState();
@@ -291,10 +296,20 @@ class ModulePlayerScreen extends StatefulWidget {
 class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   static const _speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
+  // Kept for the app session so the levels carry over between episodes.
+  static double _brightness = 1.0;
+  static double _volume = 1.0;
+
   VideoPlayerController? _controller;
   late final ModuleStateService _state;
   late int _episodeIndex;
   late ModuleStreamBundle _bundle;
+  // The module/title/episodes can change mid-playback ("Switch module").
+  late InstalledModule _module;
+  late String _titleHref;
+  late List<dynamic> _episodes;
+  String? _switching;
+  int _lastPositionMs = 0;
   int _streamIndex = 0;
   int _subIndex = -1;
   String _mode = 'sub';
@@ -310,10 +325,24 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   Timer? _saveTimer;
   Offset _doubleTapAt = Offset.zero;
 
+  // Swipe gestures: left half = brightness, right half = volume.
+  String? _dragKind;
+  double _dragBase = 0;
+  double _dragStartY = 0;
+  IconData? _hudIcon;
+  String? _hudText;
+  double? _hudValue;
+  bool _hudOnLeft = true;
+  Timer? _hudTimer;
+
   @override
   void initState() {
     super.initState();
     _state = context.read<ModuleStateService>();
+    _module = widget.module;
+    _titleHref = widget.titleHref;
+    _episodes = widget.episodes;
+    _mode = widget.initialMode;
     _episodeIndex = widget.episodeIndex;
     _bundle = widget.initial;
     _saveTimer = Timer.periodic(const Duration(seconds: 5), (_) => _saveProgress());
@@ -323,6 +352,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _hudTimer?.cancel();
     _saveTimer?.cancel();
     _saveProgress();
     final c = _controller;
@@ -341,7 +371,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   }
 
   String _episodeLabel(int index) {
-    final ep = widget.episodes[index];
+    final ep = _episodes[index];
     final label = _pick(ep, const ['title', 'name']);
     final season = _pick(ep, const ['season']);
     final base = label.isEmpty ? 'Episode ${index + 1}' : label;
@@ -363,10 +393,10 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     if (c == null || !c.value.isInitialized) return;
     final duration = c.value.duration.inMilliseconds;
     if (duration <= 0) return;
-    final ep = widget.episodes[_episodeIndex];
+    final ep = _episodes[_episodeIndex];
     unawaited(_state.saveProgress(ModuleHistoryEntry(
-      moduleId: widget.module.id,
-      titleHref: widget.titleHref,
+      moduleId: _module.id,
+      titleHref: _titleHref,
       title: widget.title,
       image: widget.image,
       episodeHref: _pick(ep, const ['href', 'url', 'id']),
@@ -405,6 +435,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
         await next.seekTo(Duration(milliseconds: startAtMs));
       }
       await next.setPlaybackSpeed(_speed);
+      await next.setVolume(_volume);
       next.addListener(_onTick);
       final old = _controller;
       old?.removeListener(_onTick);
@@ -458,14 +489,14 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
 
   Future<ModuleStreamBundle> _fetchBundle(String episodeHref, String mode) async {
     final value = await widget.runtime
-        .call(widget.module, 'extractStreamUrl', [episodeHref, mode, false])
+        .call(_module, 'extractStreamUrl', [episodeHref, mode, false])
         .timeout(const Duration(seconds: 45));
     return parseModuleStreams(value);
   }
 
   Future<void> _changeEpisode(int index) async {
-    if (index < 0 || index >= widget.episodes.length || _opening) return;
-    final href = _pick(widget.episodes[index], const ['href', 'url', 'id']);
+    if (index < 0 || index >= _episodes.length || _opening) return;
+    final href = _pick(_episodes[index], const ['href', 'url', 'id']);
     if (href.isEmpty) {
       _notice('That episode has no playable reference.');
       return;
@@ -483,6 +514,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       _bundle = bundle;
       _episodeIndex = index;
       _subIndex = -1;
+      _lastPositionMs = 0;
       await _open(0);
     } catch (e) {
       if (!mounted) return;
@@ -493,7 +525,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
 
   Future<void> _setMode(String mode) async {
     if (mode == _mode || _opening) return;
-    final href = _pick(widget.episodes[_episodeIndex], const ['href', 'url', 'id']);
+    final href = _pick(_episodes[_episodeIndex], const ['href', 'url', 'id']);
     final position = _controller?.value.position.inMilliseconds ?? 0;
     setState(() => _loading = true);
     try {
@@ -551,6 +583,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     final c = _controller;
     if (c != null) {
       final v = c.value;
+      if (v.isInitialized && v.position.inMilliseconds > 0) {
+        _lastPositionMs = v.position.inMilliseconds;
+      }
       if (v.isInitialized &&
           v.duration > Duration.zero &&
           v.position >= v.duration &&
@@ -564,9 +599,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   }
 
   Future<void> _onEnded() async {
-    final key = '${widget.module.id}|${widget.titleHref}';
+    final key = '${_module.id}|${_titleHref}';
     await _state.removeHistory(key);
-    if (_episodeIndex + 1 < widget.episodes.length) {
+    if (_episodeIndex + 1 < _episodes.length) {
       await _changeEpisode(_episodeIndex + 1);
     } else if (mounted) {
       setState(() => _controlsVisible = true);
@@ -697,6 +732,229 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
           }),
       ]);
 
+  // ----- switch module ------------------------------------------------------
+
+  int _currentPositionMs() {
+    final c = _controller;
+    if (c != null && c.value.isInitialized) return c.value.position.inMilliseconds;
+    return _lastPositionMs;
+  }
+
+  void _showModules() {
+    final modules = context
+        .read<ModulesService>()
+        .installed
+        .where((m) => m.contentType.toLowerCase() == 'video')
+        .toList();
+    final at = _fmt(Duration(milliseconds: _currentPositionMs()));
+    _showSheet('Switch module · resumes at $at', [
+      for (final m in modules)
+        _Option(
+          m.id == _module.id ? '${m.name} (current, reload)' : m.name,
+          m.id == _module.id,
+          () => m.id == _module.id ? _reloadEpisode() : _switchModule(m),
+        ),
+    ]);
+  }
+
+  /// Reloads the current episode from the current module, fresh stream URL,
+  /// same position.
+  Future<void> _reloadEpisode() async {
+    if (_opening || _switching != null) return;
+    final href = _pick(_episodes[_episodeIndex], const ['href', 'url', 'id']);
+    final position = _currentPositionMs();
+    _controller?.pause();
+    setState(() => _switching = 'Reloading from ${_module.name}…');
+    try {
+      final bundle = await _fetchBundle(href, _mode);
+      if (!mounted) return;
+      if (bundle.isEmpty) {
+        throw StateError('${_module.name} did not return a playable link.');
+      }
+      _bundle = bundle;
+      _subIndex = -1;
+      setState(() => _switching = null);
+      await _open(0, startAtMs: position);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _switching = null);
+      _notice('Could not reload: $e');
+    }
+  }
+
+  /// Finds this title and episode on [target] and carries on from the same
+  /// position. If anything fails the current stream is left as it was.
+  Future<void> _switchModule(InstalledModule target) async {
+    if (_opening || _switching != null) return;
+    final position = _currentPositionMs();
+    final current = _controller;
+    final wasPlaying = current != null && current.value.isInitialized && current.value.isPlaying;
+    final currentInfo = describeEpisodes(_episodes)[_episodeIndex];
+    current?.pause();
+    _saveProgress();
+    setState(() => _switching = 'Finding "${widget.title}" on ${target.name}…');
+    try {
+      final found = await widget.runtime
+          .call(target, 'searchResults', [widget.title])
+          .timeout(const Duration(seconds: 30));
+      final match = bestTitleMatch(widget.title, found is List ? found : const <dynamic>[]);
+      if (match == null) {
+        throw StateError('${target.name} has no close match for "${widget.title}".');
+      }
+      final newTitleHref = _pick(match, const ['href', 'url', 'id', 'link']);
+      if (newTitleHref.isEmpty) {
+        throw StateError('${target.name} returned a match without a reference.');
+      }
+
+      if (mounted) setState(() => _switching = 'Finding episode ${currentInfo.number}…');
+      final episodeValue = await widget.runtime
+          .call(target, 'extractEpisodes', [newTitleHref])
+          .timeout(const Duration(seconds: 30));
+      final newEpisodes = episodeValue is List ? episodeValue : const <dynamic>[];
+      if (newEpisodes.isEmpty) {
+        throw StateError('${target.name} returned no episodes for this title.');
+      }
+      final index = matchEpisodeIndex(
+        describeEpisodes(newEpisodes),
+        currentInfo.season,
+        currentInfo.number,
+      );
+      if (index < 0) {
+        throw StateError('Episode ${currentInfo.number} was not found on ${target.name}.');
+      }
+
+      if (mounted) setState(() => _switching = 'Loading the stream from ${target.name}…');
+      final episodeHref = _pick(newEpisodes[index], const ['href', 'url', 'id']);
+      final value = await widget.runtime
+          .call(target, 'extractStreamUrl', [episodeHref, _mode, false])
+          .timeout(const Duration(seconds: 45));
+      final bundle = parseModuleStreams(value);
+      if (bundle.isEmpty) {
+        throw StateError('${target.name} did not return a playable link.');
+      }
+      if (!mounted) return;
+
+      _module = target;
+      _titleHref = newTitleHref;
+      _episodes = newEpisodes;
+      _episodeIndex = index;
+      _bundle = bundle;
+      _subIndex = -1;
+      setState(() => _switching = null);
+      await _open(0, startAtMs: position);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _switching = null);
+      final reason = e.toString().replaceFirst(RegExp(r'^(Bad state|Exception):\s*'), '');
+      _notice('Could not switch to ${target.name}: $reason');
+      if (wasPlaying && _error == null) current?.play();
+    }
+  }
+
+  // ----- brightness / volume gestures ---------------------------------------
+
+  void _onDragStart(DragStartDetails details, Size size) {
+    final left = details.localPosition.dx < size.width / 2;
+    _dragKind = left ? 'brightness' : 'volume';
+    _dragBase = left ? _brightness : _volume;
+    _dragStartY = details.localPosition.dy;
+  }
+
+  void _onDragUpdate(DragUpdateDetails details, Size size) {
+    final kind = _dragKind;
+    if (kind == null) return;
+    final delta = (_dragStartY - details.localPosition.dy) / (size.height * 0.7);
+    final value = (_dragBase + delta).clamp(0.0, 1.0).toDouble();
+    if (kind == 'brightness') {
+      _brightness = value;
+    } else {
+      _volume = value;
+      _controller?.setVolume(value);
+    }
+    _showHud(kind, value);
+  }
+
+  void _onDragEnd() {
+    _dragKind = null;
+    _hudTimer?.cancel();
+    _hudTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted) setState(() => _hudText = null);
+    });
+  }
+
+  void _showHud(String kind, double value) {
+    _hudTimer?.cancel();
+    setState(() {
+      _hudOnLeft = kind == 'brightness';
+      _hudValue = value;
+      _hudText = '${(value * 100).round()}%';
+      _hudIcon = kind == 'brightness'
+          ? (value > 0.5 ? Icons.brightness_high : Icons.brightness_low)
+          : (value == 0
+              ? Icons.volume_off
+              : (value < 0.5 ? Icons.volume_down : Icons.volume_up));
+    });
+  }
+
+  Widget _hud() {
+    return IgnorePointer(
+      child: Align(
+        alignment: _hudOnLeft ? const Alignment(-0.75, 0) : const Alignment(0.75, 0),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: const Color(0xAA000000),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_hudIcon, color: Colors.white, size: 30),
+              const SizedBox(height: 6),
+              SizedBox(
+                width: 80,
+                child: LinearProgressIndicator(
+                  value: _hudValue,
+                  backgroundColor: Colors.white24,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _hudText ?? '',
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _switchingOverlay() {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: const Color(0xB3000000),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 14),
+                Text(
+                  _switching ?? '',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   // ----- UI ---------------------------------------------------------------
 
   @override
@@ -716,6 +974,12 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
           onDoubleTapDown: (d) => _doubleTapAt = d.localPosition,
           onDoubleTap: () =>
               _seekBy(_doubleTapAt.dx < constraints.maxWidth / 2 ? -10 : 10),
+          onVerticalDragStart: (d) =>
+              _onDragStart(d, Size(constraints.maxWidth, constraints.maxHeight)),
+          onVerticalDragUpdate: (d) =>
+              _onDragUpdate(d, Size(constraints.maxWidth, constraints.maxHeight)),
+          onVerticalDragEnd: (_) => _onDragEnd(),
+          onVerticalDragCancel: _onDragEnd,
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -724,6 +988,19 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                   child: AspectRatio(
                     aspectRatio: c.value.aspectRatio > 0 ? c.value.aspectRatio : 16 / 9,
                     child: VideoPlayer(c),
+                  ),
+                ),
+              // Brightness: dims the picture (it cannot go brighter than the
+              // phone's own brightness).
+              if (_brightness < 1.0)
+                IgnorePointer(
+                  child: ColoredBox(
+                    color: Color.fromARGB(
+                      ((1 - _brightness) * 0.85 * 255).round(),
+                      0,
+                      0,
+                      0,
+                    ),
                   ),
                 ),
               if (_loading || buffering)
@@ -756,6 +1033,8 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                   child: _controls((c != null && c.value.isInitialized) ? c : null),
                 ),
               ),
+              if (_hudText != null) _hud(),
+              if (_switching != null) _switchingOverlay(),
             ],
           ),
         ),
@@ -766,7 +1045,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   Widget _controls(VideoPlayerController? c) {
     final playing = c?.value.isPlaying ?? false;
     final hasPrev = _episodeIndex > 0;
-    final hasNext = _episodeIndex + 1 < widget.episodes.length;
+    final hasNext = _episodeIndex + 1 < _episodes.length;
     return Column(
       children: [
         Container(
@@ -873,6 +1152,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                   child: Row(
                     children: [
+                      _chip(Icons.swap_horiz, 'Switch module', _showModules),
                       _chip(Icons.record_voice_over, _mode == 'sub' ? 'Sub' : 'Dub', _showAudio),
                       _chip(
                         Icons.hd,
@@ -965,10 +1245,31 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                 style: const TextStyle(color: Colors.white),
               ),
               const SizedBox(height: 16),
+              if (_switching != null) ...[
+                Row(
+                  children: [
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(_switching!, style: const TextStyle(color: Colors.white70)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+              ],
               Wrap(
                 spacing: 8,
                 children: [
-                  FilledButton(
+                  FilledButton.icon(
+                    onPressed: _switching != null ? null : _showModules,
+                    icon: const Icon(Icons.swap_horiz),
+                    label: const Text('Switch module'),
+                  ),
+                  OutlinedButton(
                     onPressed: () => _open(_streamIndex),
                     child: const Text('Retry'),
                   ),
