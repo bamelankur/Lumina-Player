@@ -36,7 +36,7 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
         _results.clear();
         _errors
           ..clear()
-          ..['modules'] = 'Install a compatible Synthetiq video module from the Repository tab first.';
+          ..['modules'] = 'Install a compatible video module from Repository or import a Lumina module ZIP first.';
       });
       return;
     }
@@ -208,14 +208,14 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
         if (modules.isEmpty)
           const Padding(
             padding: EdgeInsets.all(20),
-            child: Text('No video providers installed. Open Repository, install a compatible Synthetiq video module, then return here.'),
+            child: Text('No video providers installed. Install a compatible module from Repository or import a Lumina module ZIP, then return here.'),
           ),
         Expanded(
           child: _results.isEmpty
               ? Center(
                   child: Text(_searching
                       ? 'Searching modules…'
-                      : 'Search runs against each installed compatible Synthetiq video module.'))
+                      : 'Search runs against each installed compatible video module.'))
               : ListView(
                   children: [
                     for (final module in modules) ...[
