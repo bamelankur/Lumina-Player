@@ -127,8 +127,8 @@ class _ModulesScreenState extends State<ModulesScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           child: Text(
             _tab == 2
-                ? 'Browse executes installed Contract V4 video modules for search, details, episodes and stream resolution.'
-                : 'Install modules from the repository or import a compatible ZIP. Contract V4 video modules can be searched from Browse.',
+                ? 'Browse runs installed Lumina-compatible video modules for search, details, episodes and stream resolution.'
+                : 'Install modules from Lumina Modules or import a compatible ZIP. Installed video modules can be searched from Browse.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),
