@@ -5,7 +5,7 @@ import 'package:fjs/fjs.dart';
 
 import 'modules_service.dart';
 
-/// Executes a locally installed Synthetiq Contract V4 module in a QuickJS
+/// Executes a locally installed Synthetiq module in an isolated QuickJS
 /// context. Each provider gets its own engine so globals/caches do not collide.
 class SynthetiqModuleRuntime {
   static Future<void>? _libraryInit;
@@ -63,7 +63,7 @@ class SynthetiqModuleRuntime {
     );
     try {
       await engine.initWithoutBridge();
-      // Contract V4 modules commonly call fetchv2(url, headers, method, body).
+      // Synthetiq modules use fetchv2(url, headers, method, body).
       // Adapt that contract to the runtime's Fetch API.
       await engine.eval(
         source: JsCode.code(r'''
