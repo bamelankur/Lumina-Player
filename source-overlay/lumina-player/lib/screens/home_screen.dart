@@ -234,6 +234,22 @@ class _HomeScreenState extends State<HomeScreen> {
     await resumeModuleTitle(context, _runtime, module, entry);
   }
 
+  void _showHistoryInfo(ModuleHistoryEntry entry) {
+    InstalledModule? module;
+    for (final m in context.read<ModulesService>().installed) {
+      if (m.id == entry.moduleId) module = m;
+    }
+    if (module == null) {
+      _snack('The module for ${entry.title} is no longer installed.');
+      return;
+    }
+    _showInfo(module, {
+      'href': entry.titleHref,
+      'title': entry.title,
+      'image': entry.image,
+    });
+  }
+
   // ----- UI ---------------------------------------------------------------
 
   @override
@@ -312,10 +328,11 @@ class _HomeScreenState extends State<HomeScreen> {
                           subtitle: e.episodeTitle,
                           progress: e.fraction,
                           onTap: () => _resume(e),
-                          onLongPress: () {
+                          onRemove: () {
                             context.read<ModuleStateService>().removeHistory(e.key);
                             _snack('Removed ${e.title} from Continue Watching.');
                           },
+                          onInfo: () => _showHistoryInfo(e),
                         ),
                       );
                     },
