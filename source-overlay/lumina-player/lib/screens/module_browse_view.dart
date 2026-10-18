@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
-import 'package:video_player/video_player.dart';
 
 import '../services/modules_service.dart';
 import '../services/synthetiq_module_runtime.dart';
+import 'module_player_screen.dart';
 
 /// Lumina module browser backed by the Lumina API and compatible legacy handlers.
 class ModuleBrowseView extends StatefulWidget {
@@ -249,17 +248,21 @@ Future<void> openModuleTitle(
       notice('The selected episode has no playable reference.');
       return;
     }
-    final stream = await runtime.call(module, 'extractStreamUrl', [episodeHref, 'sub', false]);
-    final streamUrl = _findStreamUrl(stream);
-    if (streamUrl.isEmpty) {
-      notice('The module did not return a direct playable URL.');
-      return;
-    }
-    final headers = _findHeaders(stream);
+    final chosenIndex = episodes.indexOf(chosen);
+    final image = moduleString(details, ['image', 'poster', 'posterUrl', 'imageUrl']).isNotEmpty
+        ? moduleString(details, ['image', 'poster', 'posterUrl', 'imageUrl'])
+        : moduleString(card, ['image', 'poster', 'posterUrl', 'imageUrl']);
     if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => _ModuleVideoPlayer(title: title, url: streamUrl, headers: headers),
-    ));
+    await openModulePlayer(
+      context,
+      runtime: runtime,
+      module: module,
+      titleHref: href,
+      title: title,
+      image: image,
+      episodes: episodes,
+      index: chosenIndex < 0 ? 0 : chosenIndex,
+    );
   } catch (e) {
     notice('Could not open title: $e');
   }
@@ -416,50 +419,6 @@ String moduleString(dynamic value, List<String> keys) {
   return '';
 }
 
-String _findStreamUrl(dynamic value) {
-  if (value is String && value.startsWith('http')) return value;
-  if (value is List) {
-    for (final item in value) {
-      final found = _findStreamUrl(item);
-      if (found.isNotEmpty) return found;
-    }
-  }
-  if (value is Map) {
-    for (final key in ['url', 'file', 'src', 'streamUrl', 'stream_url', 'link']) {
-      final candidate = value[key];
-      if (candidate is String && (candidate.startsWith('http://') || candidate.startsWith('https://'))) {
-        return candidate;
-      }
-    }
-    for (final key in ['streams', 'sources', 'data', 'result', 'links']) {
-      if (value.containsKey(key)) {
-        final found = _findStreamUrl(value[key]);
-        if (found.isNotEmpty) return found;
-      }
-    }
-  }
-  return '';
-}
-
-Map<String, String> _findHeaders(dynamic value) {
-  if (value is Map) {
-    final headers = value['headers'] ?? value['streamHeaders'];
-    if (headers is Map) return headers.map((key, val) => MapEntry(key.toString(), val.toString()));
-    for (final key in ['streams', 'sources', 'data', 'result', 'links']) {
-      if (value.containsKey(key)) {
-        final found = _findHeaders(value[key]);
-        if (found.isNotEmpty) return found;
-      }
-    }
-  } else if (value is List) {
-    for (final item in value) {
-      final found = _findHeaders(item);
-      if (found.isNotEmpty) return found;
-    }
-  }
-  return {};
-}
-
 Widget moduleImage(String url, {double width = 48, double height = 68}) {
   if (url.startsWith('http://') || url.startsWith('https://')) {
     return ClipRRect(
@@ -469,101 +428,4 @@ Widget moduleImage(String url, {double width = 48, double height = 68}) {
     );
   }
   return SizedBox(width: width, child: const Icon(Icons.movie_outlined));
-}
-
-class _ModuleVideoPlayer extends StatefulWidget {
-  const _ModuleVideoPlayer({required this.title, required this.url, required this.headers});
-  final String title;
-  final String url;
-  final Map<String, String> headers;
-
-  @override
-  State<_ModuleVideoPlayer> createState() => _ModuleVideoPlayerState();
-}
-
-class _ModuleVideoPlayerState extends State<_ModuleVideoPlayer> {
-  late final VideoPlayerController _controller;
-  Object? _error;
-  String? _probe;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.url), httpHeaders: widget.headers)
-      ..initialize().then((_) {
-        if (mounted) setState(() {});
-        _controller.play();
-      }).catchError((Object error) {
-        if (mounted) setState(() => _error = error);
-        _runProbe();
-      });
-  }
-
-  /// Playback failed: fetch the first bytes ourselves so the screen can show
-  /// whether the problem is the network, the server's answer or the file.
-  Future<void> _runProbe() async {
-    final lines = <String>['URL: ${widget.url}'];
-    try {
-      final res = await http
-          .get(Uri.parse(widget.url), headers: {...widget.headers, 'Range': 'bytes=0-1023'})
-          .timeout(const Duration(seconds: 15));
-      final bytes = res.bodyBytes;
-      final marker = bytes.length >= 8 ? String.fromCharCodes(bytes.sublist(4, 8)) : '(too short)';
-      lines
-        ..add('HTTP status: ${res.statusCode}')
-        ..add('Content-Type: ${res.headers['content-type']}')
-        ..add('Content-Length: ${res.headers['content-length']}')
-        ..add('Content-Range: ${res.headers['content-range']}')
-        ..add('Bytes received: ${bytes.length}')
-        ..add('File marker (bytes 4-8, MP4 should say "ftyp"): $marker');
-    } catch (e) {
-      lines.add('Network test failed: $e');
-    }
-    if (mounted) setState(() => _probe = lines.join('\n'));
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
-      body: Center(
-        child: _error != null
-            ? SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: SelectableText(
-                  'Playback failed: $_error\n\n'
-                  '${_probe ?? 'Running network test…'}',
-                ),
-              )
-            : !_controller.value.isInitialized
-                ? const CircularProgressIndicator()
-                : AspectRatio(
-                    aspectRatio: _controller.value.aspectRatio,
-                    child: Stack(
-                      alignment: Alignment.bottomCenter,
-                      children: [
-                        VideoPlayer(_controller),
-                        VideoProgressIndicator(_controller, allowScrubbing: true),
-                        Align(
-                          alignment: Alignment.center,
-                          child: IconButton.filled(
-                            iconSize: 42,
-                            onPressed: () => setState(() {
-                              _controller.value.isPlaying ? _controller.pause() : _controller.play();
-                            }),
-                            icon: Icon(_controller.value.isPlaying ? Icons.pause : Icons.play_arrow),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-      ),
-    );
-  }
 }
