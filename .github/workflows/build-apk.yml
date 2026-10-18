@@ -78,7 +78,7 @@ jobs:
         working-directory: lumina-player
 
       - name: Build APK
-        run: flutter build apk --release
+        run: flutter build apk --release --no-shrink
         working-directory: lumina-player
 
       - name: Verify INTERNET permission in built APK
