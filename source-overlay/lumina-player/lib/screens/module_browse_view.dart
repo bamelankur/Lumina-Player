@@ -5,7 +5,7 @@ import 'package:video_player/video_player.dart';
 import '../services/modules_service.dart';
 import '../services/synthetiq_module_runtime.dart';
 
-/// A Synthetiq module browser backed by the documented module handlers.
+/// Lumina module browser backed by the Lumina API and compatible legacy handlers.
 class ModuleBrowseView extends StatefulWidget {
   const ModuleBrowseView({super.key});
 
@@ -14,7 +14,7 @@ class ModuleBrowseView extends StatefulWidget {
 }
 
 class _ModuleBrowseViewState extends State<ModuleBrowseView> {
-  final _runtime = SynthetiqModuleRuntime();
+  final _runtime = LuminaModuleRuntime();
   final _query = TextEditingController();
   final Map<String, List<dynamic>> _results = {};
   final Map<String, String> _errors = {};
