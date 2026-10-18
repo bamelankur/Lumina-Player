@@ -48,8 +48,34 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
     for (final module in modules) {
       if (!mounted) return;
       try {
-        final value = await _runtime.call(module, 'searchResults', [_query.text.trim(), 0]);
-        final list = value is List ? value : const [];
+        dynamic value;
+        List<dynamic> list;
+        if (_query.text.trim().isEmpty) {
+          try {
+            value = await _runtime.call(module, 'discoveryHome');
+          } catch (_) {
+            value = null;
+          }
+          if (value is Map && value['sections'] is List) {
+            list = (value['sections'] as List)
+                .whereType<Map>()
+                .expand((section) => section['items'] is List ? section['items'] as List : const <dynamic>[])
+                .toList();
+          } else if (value is List) {
+            list = value;
+          } else {
+            try {
+              value = await _runtime.call(module, 'extractHome');
+              list = value is List ? value : (value is Map && value['items'] is List ? value['items'] as List : const <dynamic>[]);
+            } catch (_) {
+              value = await _runtime.call(module, 'searchResults', ['', 0]);
+              list = value is List ? value : const [];
+            }
+          }
+        } else {
+          value = await _runtime.call(module, 'searchResults', [_query.text.trim(), 0]);
+          list = value is List ? value : const [];
+        }
         _results[module.id] = list;
         if (list.isEmpty) _errors[module.id] = 'No results returned.';
       } catch (e) {
