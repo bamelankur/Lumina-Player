@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../services/modules_service.dart';
 import '../services/synthetiq_module_runtime.dart';
-import 'module_player_screen.dart';
+import 'module_title_screen.dart';
 
 /// Lumina module browser backed by the Lumina API and compatible legacy handlers.
 class ModuleBrowseView extends StatefulWidget {
@@ -136,136 +136,89 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
   }
 }
 
-/// Loads the list of cards for one module. An empty [query] loads the module's
-/// own home feed; otherwise it runs the module's search.
-Future<List<dynamic>> loadModuleItems(
+/// A titled row of cards on a module's home page ("Trending Now", "Latest"...).
+/// A module that returns a plain list gets a single section with an empty title.
+class ModuleSection {
+  const ModuleSection(this.title, this.items);
+  final String title;
+  final List<dynamic> items;
+}
+
+/// Loads a module's home feed as sections. Modules that return
+/// `{sections: [{title, items}]}` from `discoveryHome` keep their rows; anything
+/// else becomes a single untitled section.
+Future<List<ModuleSection>> loadModuleSections(
   LuminaModuleRuntime runtime,
   InstalledModule module,
-  String query,
 ) async {
-  final q = query.trim();
   dynamic value;
-  if (q.isNotEmpty) {
-    value = await runtime.call(module, 'searchResults', [q]);
-    return value is List ? value : const <dynamic>[];
-  }
   try {
     value = await runtime.call(module, 'discoveryHome');
   } catch (_) {
     value = null;
   }
   if (value is Map && value['sections'] is List) {
-    return (value['sections'] as List)
-        .whereType<Map>()
-        .expand((section) =>
-            section['items'] is List ? section['items'] as List : const <dynamic>[])
-        .toList();
+    final sections = <ModuleSection>[];
+    for (final section in value['sections'] as List) {
+      if (section is! Map) continue;
+      final items = section['items'] is List ? section['items'] as List : const <dynamic>[];
+      if (items.isEmpty) continue;
+      sections.add(ModuleSection(moduleString(section, ['title', 'name', 'label']), items));
+    }
+    return sections;
   }
-  if (value is List) return value;
+  if (value is List) return [ModuleSection('', value)];
+  List<dynamic> flat;
   try {
     value = await runtime.call(module, 'extractHome');
-    if (value is List) return value;
-    if (value is Map && value['items'] is List) return value['items'] as List;
-    return const <dynamic>[];
+    if (value is List) {
+      flat = value;
+    } else if (value is Map && value['items'] is List) {
+      flat = value['items'] as List;
+    } else {
+      flat = const <dynamic>[];
+    }
   } catch (_) {
     value = await runtime.call(module, 'searchResults', ['']);
-    return value is List ? value : const <dynamic>[];
+    flat = value is List ? value : const <dynamic>[];
   }
+  return [ModuleSection('', flat)];
 }
 
-/// Opens a title card: details, episode list, then the player.
+/// Loads the list of cards for one module. An empty [query] loads the module's
+/// own home feed (all sections joined); otherwise it runs the module's search.
+Future<List<dynamic>> loadModuleItems(
+  LuminaModuleRuntime runtime,
+  InstalledModule module,
+  String query,
+) async {
+  final q = query.trim();
+  if (q.isNotEmpty) {
+    final value = await runtime.call(module, 'searchResults', [q]);
+    return value is List ? value : const <dynamic>[];
+  }
+  final sections = await loadModuleSections(runtime, module);
+  return sections.expand((section) => section.items).toList();
+}
+
+/// Opens a title card: its page with the episode grid, from which the player
+/// is started.
 Future<void> openModuleTitle(
   BuildContext context,
   LuminaModuleRuntime runtime,
   InstalledModule module,
   dynamic card,
 ) async {
-  void notice(String text) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-  }
-
   final href = moduleString(card, ['href', 'url', 'id', 'link']);
   if (href.isEmpty) {
-    notice('This result does not include a title reference.');
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('This result does not include a title reference.')),
+    );
     return;
   }
-  try {
-    dynamic details;
-    try {
-      details = await runtime.call(module, 'extractDetails', [href]);
-    } catch (_) {
-      details = card;
-    }
-    final title = moduleString(details, ['title', 'name']).isNotEmpty
-        ? moduleString(details, ['title', 'name'])
-        : moduleString(card, ['title', 'name']);
-    final episodeValue = await runtime.call(module, 'extractEpisodes', [href]);
-    final episodes = episodeValue is List ? episodeValue : const [];
-    if (!context.mounted) return;
-    if (episodes.isEmpty) {
-      notice('No episodes were returned for $title.');
-      return;
-    }
-    final chosen = await showModalBottomSheet<dynamic>(
-      context: context,
-      isScrollControlled: true,
-      builder: (sheetContext) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.of(sheetContext).size.height * 0.7,
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(title, style: Theme.of(sheetContext).textTheme.titleLarge),
-              ),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: episodes.length,
-                  itemBuilder: (_, index) {
-                    final ep = episodes[index];
-                    final label = moduleString(ep, ['title', 'name']).isNotEmpty
-                        ? moduleString(ep, ['title', 'name'])
-                        : 'Episode ${index + 1}';
-                    final season = moduleString(ep, ['season']);
-                    return ListTile(
-                      leading: const Icon(Icons.play_circle_outline),
-                      title: Text(label),
-                      subtitle: season.isEmpty ? null : Text('Season $season'),
-                      onTap: () => Navigator.pop(sheetContext, ep),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (chosen == null || !context.mounted) return;
-    final episodeHref = moduleString(chosen, ['href', 'url', 'id']);
-    if (episodeHref.isEmpty) {
-      notice('The selected episode has no playable reference.');
-      return;
-    }
-    final chosenIndex = episodes.indexOf(chosen);
-    final image = moduleString(details, ['image', 'poster', 'posterUrl', 'imageUrl']).isNotEmpty
-        ? moduleString(details, ['image', 'poster', 'posterUrl', 'imageUrl'])
-        : moduleString(card, ['image', 'poster', 'posterUrl', 'imageUrl']);
-    if (!context.mounted) return;
-    await openModulePlayer(
-      context,
-      runtime: runtime,
-      module: module,
-      titleHref: href,
-      title: title,
-      image: image,
-      episodes: episodes,
-      index: chosenIndex < 0 ? 0 : chosenIndex,
-    );
-  } catch (e) {
-    notice('Could not open title: $e');
-  }
+  await Navigator.of(context).push(MaterialPageRoute(
+    builder: (_) => ModuleTitleScreen(runtime: runtime, module: module, card: card),
+  ));
 }
 
 /// A single module's own page: its suggested media (home feed) plus a search
