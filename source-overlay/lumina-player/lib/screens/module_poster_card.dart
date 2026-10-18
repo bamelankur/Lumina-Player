@@ -30,6 +30,8 @@ class ModulePosterCard extends StatelessWidget {
     this.subtitle = '',
     this.progress,
     this.onLongPress,
+    this.onRemove,
+    this.onInfo,
   });
 
   final String title;
@@ -40,6 +42,28 @@ class ModulePosterCard extends StatelessWidget {
   final double? progress;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+
+  /// Optional small buttons drawn over the poster: X (top right) and info (top left).
+  final VoidCallback? onRemove;
+  final VoidCallback? onInfo;
+
+  Widget _badge(IconData icon, String tooltip, VoidCallback onTap) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: const Color(0xAA000000),
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(icon, size: 16, color: Colors.white),
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -64,6 +88,14 @@ class ModulePosterCard extends StatelessWidget {
                       right: 0,
                       bottom: 0,
                       child: LinearProgressIndicator(value: progress, minHeight: 4),
+                    ),
+                  if (onInfo != null)
+                    Positioned(top: 4, left: 4, child: _badge(Icons.info_outline, 'Details', onInfo!)),
+                  if (onRemove != null)
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: _badge(Icons.close, 'Remove from Continue Watching', onRemove!),
                     ),
                 ],
               ),
