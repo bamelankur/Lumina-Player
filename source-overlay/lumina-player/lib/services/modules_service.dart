@@ -234,16 +234,15 @@ class ModulesService extends ChangeNotifier {
         extracted[normalized] = content;
       }
     }
-    String? metadataPath;
-    for (final key in extracted.keys) {
-      if (p.basename(key) == 'module.json') {
-        metadataPath = key;
-        break;
-      }
+    // Synthetiq packages may name the manifest after the module, e.g.
+    // example-module.json. The public contract expects one JSON manifest.
+    final manifests = extracted.keys
+        .where((key) => p.extension(key).toLowerCase() == '.json')
+        .toList();
+    if (manifests.length != 1) {
+      throw FormatException('Expected exactly one JSON module manifest; found ${manifests.length}.');
     }
-    if (metadataPath == null) {
-      throw const FormatException('This ZIP does not contain module.json.');
-    }
+    final metadataPath = manifests.single;
     final metadata = jsonDecode(utf8.decode(extracted[metadataPath]!));
     if (metadata is! Map) throw const FormatException('module.json must be a JSON object.');
     final moduleJson = Map<String, dynamic>.from(metadata);
@@ -259,7 +258,12 @@ class ModulesService extends ChangeNotifier {
         ? Map<String, dynamic>.from(config['runtime'] as Map)
         : <String, dynamic>{};
     final entry = (runtime['entry'] ?? 'index.js').toString();
-    final hasEntry = extracted.keys.any((key) => p.basename(key) == p.basename(entry));
+    if (entry.isEmpty || entry.startsWith('/') || entry.contains('..') || entry.contains(r'\\')) {
+      throw const FormatException('Module entry path is unsafe.');
+    }
+    final manifestPrefix = p.dirname(metadataPath);
+    final normalizedEntry = p.normalize(p.join(manifestPrefix == '.' ? '' : manifestPrefix, entry));
+    final hasEntry = extracted.containsKey(normalizedEntry);
     if (!hasEntry) throw FormatException('Module entry file "$entry" was not found in ZIP.');
     moduleJson['id'] = id;
     moduleJson['name'] = name.isEmpty ? id : name;
