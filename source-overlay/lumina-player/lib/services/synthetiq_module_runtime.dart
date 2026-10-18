@@ -29,20 +29,20 @@ class SynthetiqModuleRuntime {
   }
 
   Future<JsEngine> _createEngine(InstalledModule module) async {
-    final metadataFile = File('\${module.directory}\${Platform.pathSeparator}module.json');
+    final metadataFile = File('${module.directory}${Platform.pathSeparator}module.json');
     final metadata = jsonDecode(await metadataFile.readAsString());
     if (metadata is! Map) throw const FormatException('Module metadata is invalid.');
-    final contract = int.tryParse('\${metadata['contractVersion'] ?? 0}') ?? 0;
+    final contract = int.tryParse('${metadata['contractVersion'] ?? 0}') ?? 0;
     if (contract != 4) {
       throw FormatException('Unsupported module contract $contract. Lumina currently supports Contract V4.');
     }
     final config = metadata['config'] is Map ? metadata['config'] as Map : const {};
     final runtime = config['runtime'] is Map ? config['runtime'] as Map : const {};
-    final entry = '\${runtime['entry'] ?? 'index.js'}';
+    final entry = '${runtime['entry'] ?? 'index.js'}';
     if (entry.contains('..') || entry.startsWith('/') || entry.contains(r'\')) {
       throw const FormatException('Unsafe module entry path.');
     }
-    final entryFile = File('\${module.directory}\${Platform.pathSeparator}$entry');
+    final entryFile = File('${module.directory}${Platform.pathSeparator}$entry');
     if (!await entryFile.exists()) throw FormatException('Module entry file "$entry" was not found.');
     final source = await entryFile.readAsString();
     if (source.length > 2 * 1024 * 1024) {
@@ -52,7 +52,6 @@ class SynthetiqModuleRuntime {
     await LibFjs.init();
     final engine = await JsEngine.create(
       builtins: JsBuiltinOptions.web(),
-      runtimeOptions: JsEngineRuntimeOptions.defaults(),
     );
     try {
       await engine.initWithoutBridge();
@@ -86,7 +85,7 @@ class SynthetiqModuleRuntime {
           })
         '''),
       );
-      final flags = jsonDecode('\${exports.value}');
+      final flags = jsonDecode('${exports.value}');
       if (flags is! Map || flags['search'] != true) {
         throw const FormatException('Module did not expose the Contract V4 searchResults function.');
       }
@@ -109,7 +108,7 @@ class SynthetiqModuleRuntime {
     if (!allowed.contains(function)) throw ArgumentError('Unsupported module function.');
     final engine = await _engineFor(module);
     final argsJson = jsonEncode(args);
-    final source = 'JSON.stringify(await globalThis[\${jsonEncode(function)}](...$argsJson))';
+    final source = 'JSON.stringify(await globalThis[${jsonEncode(function)}](...$argsJson))';
     final result = await engine.eval(
       source: JsCode.code(source),
       options: JsEngine.withPromise(),
