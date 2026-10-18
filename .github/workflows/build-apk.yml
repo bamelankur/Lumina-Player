@@ -13,6 +13,9 @@ jobs:
       - name: Unzip project
         run: unzip -q lumina-player.zip
 
+      - name: Apply source overlay
+        run: cp -a source-overlay/lumina-player/. lumina-player/
+
       - name: Set Android compile SDK
         run: |
           python3 - <<'PY'
@@ -25,14 +28,20 @@ jobs:
           for path in files:
               source = path.read_text()
               updated = source
-              updated = re.sub(r'compileSdkVersion\\s+34\\b', 'compileSdkVersion 36', updated)
-              updated = re.sub(r'compileSdk\\s*=\\s*34\\b', 'compileSdk = 36', updated)
-              updated = re.sub(r'compileSdkVersion\\s+flutter\\.compileSdkVersion', 'compileSdkVersion 36', updated)
-              updated = re.sub(r'compileSdk\\s*=\\s*flutter\\.compileSdkVersion', 'compileSdk = 36', updated)
+              updated = re.sub(r'compileSdkVersion\s+34\b', 'compileSdkVersion 36', updated)
+              updated = re.sub(r'compileSdkVersion\s*=\s*34\b', 'compileSdkVersion = 36', updated)
+              updated = re.sub(r'compileSdk\s*=\s*34\b', 'compileSdk = 36', updated)
+              updated = re.sub(r'compileSdkVersion\s+flutter\.compileSdkVersion', 'compileSdkVersion 36', updated)
+              updated = re.sub(r'compileSdkVersion\s*=\s*flutter\.compileSdkVersion', 'compileSdkVersion = 36', updated)
+              updated = re.sub(r'compileSdk\s*=\s*flutter\.compileSdkVersion', 'compileSdk = 36', updated)
               if updated != source:
                   path.write_text(updated)
                   changed.append(str(path))
           print("Updated Android compile SDK in:", changed if changed else "no matching declarations found")
+          app_gradle = [p for p in files if p.parent.name == "app"]
+          app_sources = "\n".join(p.read_text() for p in app_gradle)
+          if not re.search(r'compileSdk(?:Version)?\s*(?:=\s*)?36\b', app_sources):
+              raise SystemExit("Could not confirm Android app compileSdk is set to 36.")
           PY
 
       - name: Set up Java 17
