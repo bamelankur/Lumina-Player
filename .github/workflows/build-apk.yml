@@ -91,11 +91,13 @@ jobs:
           grep -q "android.permission.INTERNET" perms.txt
 
       - name: Package Lumina demo module
+        if: hashFiles('examples/lumina-demo/module.json') != ''
         run: |
           cd examples/lumina-demo
           zip -q ../../lumina-demo-module.zip module.json index.js
 
       - name: Upload Lumina demo module
+        if: hashFiles('examples/lumina-demo/module.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: lumina-demo-module
