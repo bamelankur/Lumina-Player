@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'screens/downloads_screen.dart';
 import 'screens/favorites_screen.dart';
 import 'screens/home_screen.dart';
-import 'screens/library_screen.dart';
 import 'screens/modules_screen.dart';
 import 'screens/settings_screen.dart';
+import 'services/download_service.dart';
 import 'services/favorites_service.dart';
 import 'services/library_service.dart';
 import 'services/module_state_service.dart';
@@ -23,6 +24,7 @@ class LuminaApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => LibraryService()..load()),
+        ChangeNotifierProvider(create: (_) => DownloadService()..load()),
         ChangeNotifierProvider(create: (_) => FavoritesService()..load()),
         ChangeNotifierProvider(create: (_) => ProgressService()..load()),
         ChangeNotifierProvider(create: (_) => SyncService()..load()),
@@ -59,11 +61,11 @@ class _Shell extends StatefulWidget {
 class _ShellState extends State<_Shell> {
   int _index = 0;
 
-  static const _titles = ['Home', 'Library', 'Favourites', 'Modules', 'Settings'];
+  static const _titles = ['Home', 'Downloads', 'Favourites', 'Modules', 'Settings'];
 
   static const _screens = [
     HomeScreen(),
-    LibraryScreen(),
+    DownloadsScreen(),
     FavoritesScreen(),
     ModulesScreen(),
     SettingsScreen(),
@@ -84,9 +86,9 @@ class _ShellState extends State<_Shell> {
               selectedIcon: Icon(Icons.home),
               label: 'Home'),
           NavigationDestination(
-              icon: Icon(Icons.video_library_outlined),
-              selectedIcon: Icon(Icons.video_library),
-              label: 'Library'),
+              icon: Icon(Icons.download_outlined),
+              selectedIcon: Icon(Icons.download),
+              label: 'Downloads'),
           NavigationDestination(
               icon: Icon(Icons.favorite_border),
               selectedIcon: Icon(Icons.favorite),
