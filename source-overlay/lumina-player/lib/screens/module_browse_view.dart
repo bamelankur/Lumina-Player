@@ -215,7 +215,7 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
               ? Center(
                   child: Text(_searching
                       ? 'Searching modules…'
-                      : 'Search runs against each installed Contract V4 video module.'))
+                      : 'Search runs against each installed compatible Synthetiq video module.'))
               : ListView(
                   children: [
                     for (final module in modules) ...[
