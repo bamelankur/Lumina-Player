@@ -8,6 +8,7 @@ import 'screens/modules_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/favorites_service.dart';
 import 'services/library_service.dart';
+import 'services/module_state_service.dart';
 import 'services/modules_service.dart';
 import 'services/progress_service.dart';
 import 'services/server_service.dart';
@@ -27,6 +28,7 @@ class LuminaApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => SyncService()..load()),
         ChangeNotifierProvider(create: (_) => ServerService()..load()),
         ChangeNotifierProvider(create: (_) => ModulesService()..load()),
+        ChangeNotifierProvider(create: (_) => ModuleStateService()..load()),
       ],
       child: MaterialApp(
         title: 'Lumina',
@@ -70,7 +72,8 @@ class _ShellState extends State<_Shell> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(_titles[_index])),
+      // Home draws its own header (module picker + search), so no app bar there.
+      appBar: _index == 0 ? null : AppBar(title: Text(_titles[_index])),
       body: IndexedStack(index: _index, children: _screens),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
