@@ -121,7 +121,8 @@ class SynthetiqModuleRuntime {
   ]) async {
     const allowed = {
       'searchResults', 'extractDetails', 'extractEpisodes', 'extractStreamUrl',
-      'extractHome', 'discoveryHome', 'discoveryFeed',\n      'extractChapters', 'extractImages', 'extractText',
+      'extractHome', 'discoveryHome', 'discoveryFeed',
+      'extractChapters', 'extractImages', 'extractText',
     };
     if (!allowed.contains(function)) throw ArgumentError('Unsupported module function.');
     final engine = await _engineFor(module);
