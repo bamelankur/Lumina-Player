@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const luminaRepositoryUrl =
     'https://raw.githubusercontent.com/bamelankur/Lumina-Modules/main/repository.json';
@@ -83,6 +84,18 @@ class ModulesService extends ChangeNotifier {
   List<RepositoryModule> catalogue = [];
   bool loading = false;
   String? error;
+  String repositoryUrl = luminaRepositoryUrl;
+
+  Future<void> setRepositoryUrl(String value) async {
+    final parsed = Uri.tryParse(value.trim());
+    if (parsed == null || (parsed.scheme != 'https' && parsed.scheme != 'http') || parsed.host.isEmpty) {
+      throw const FormatException('Enter a valid repository JSON URL beginning with https:// or http://.');
+    }
+    repositoryUrl = parsed.toString();
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString('lumina_module_repository_url', repositoryUrl);
+    await loadRepository(url: repositoryUrl);
+  }
 
   Future<Directory> _root() async {
     final support = await getApplicationSupportDirectory();
@@ -121,7 +134,10 @@ class ModulesService extends ChangeNotifier {
     }
   }
 
-  Future<void> loadRepository() async {
+  Future<void> loadRepository({String? url}) async {
+    if (url != null && url.trim().isNotEmpty) repositoryUrl = url.trim();
+    final preferences = await SharedPreferences.getInstance();
+    repositoryUrl = preferences.getString('lumina_module_repository_url') ?? repositoryUrl;
     loading = true;
     error = null;
     notifyListeners();
@@ -129,7 +145,7 @@ class ModulesService extends ChangeNotifier {
       dynamic decoded;
       Object? rawFailure;
       try {
-        final response = await http.get(Uri.parse(luminaRepositoryUrl)).timeout(
+        final response = await http.get(Uri.parse(repositoryUrl)).timeout(
           const Duration(seconds: 20),
         );
         if (response.statusCode != 200) {
@@ -138,6 +154,9 @@ class ModulesService extends ChangeNotifier {
         decoded = jsonDecode(response.body);
       } catch (e) {
         rawFailure = e;
+        if (repositoryUrl != luminaRepositoryUrl) {
+          throw HttpException('Could not load repository URL $repositoryUrl: $e');
+        }
         // Some networks can resolve github.com but fail to resolve
         // raw.githubusercontent.com. Use GitHub's Contents API as a fallback.
         try {
