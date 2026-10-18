@@ -19,6 +19,7 @@ dependencies:
   archive: ^3.6.1
   crypto: ^3.0.6
   path_provider: ^2.1.4
+  fjs: ^3.3.2
 
 dependency_overrides:
   # Keep the transitive Android lifecycle plugin compatible with file_picker's
