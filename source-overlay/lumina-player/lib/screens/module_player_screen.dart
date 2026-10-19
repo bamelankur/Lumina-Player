@@ -149,8 +149,84 @@ ModuleStreamBundle parseModuleStreams(dynamic value) {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// Resolves the streams for `episodes[index]` and opens the player.
-/// Completes when the player is closed.
+/// Resolves module streams and remembers them briefly, so tapping an episode
+/// that was already looked up (or prefetched) starts straight away.
+class ModuleStreamResolver {
+  ModuleStreamResolver._();
+
+  // Stream URLs expire, so a cached lookup is only trusted for a few minutes.
+  static const _ttl = Duration(minutes: 5);
+  static final Map<String, ({ModuleStreamBundle bundle, DateTime at})> _cache = {};
+  static final Map<String, Future<ModuleStreamBundle>> _inflight = {};
+
+  /// The language last used per module (for the app session), so resuming from
+  /// Continue Watching opens in the language you were using.
+  static final Map<String, String> lastLanguage = {};
+
+  static String _key(InstalledModule module, String href, String language) =>
+      '${module.id}|$href|$language';
+
+  static ModuleStreamBundle? cached(InstalledModule module, String href, String language) {
+    final hit = _cache[_key(module, href, language)];
+    if (hit == null) return null;
+    if (DateTime.now().difference(hit.at) >= _ttl) return null;
+    return hit.bundle;
+  }
+
+  /// Returns the streams for [href] in [language]. Concurrent callers for the
+  /// same episode share one module call. [fresh] skips the cache (used when a
+  /// cached link has stopped working).
+  static Future<ModuleStreamBundle> resolve(
+    LuminaModuleRuntime runtime,
+    InstalledModule module,
+    String href,
+    String language, {
+    bool fresh = false,
+    Duration timeout = const Duration(seconds: 45),
+  }) {
+    final key = _key(module, href, language);
+    if (!fresh) {
+      final hit = cached(module, href, language);
+      if (hit != null) return Future.value(hit);
+      final pending = _inflight[key];
+      if (pending != null) return pending;
+    }
+    final future = () async {
+      final value = await runtime
+          .call(module, 'extractStreamUrl', [href, language, false])
+          .timeout(timeout);
+      final bundle = parseModuleStreams(value);
+      if (!bundle.isEmpty) {
+        _cache[key] = (bundle: bundle, at: DateTime.now());
+        if (_cache.length > 80) {
+          final now = DateTime.now();
+          _cache.removeWhere((_, v) => now.difference(v.at) >= _ttl);
+        }
+      }
+      return bundle;
+    }();
+    _inflight[key] = future;
+    future.then<void>((_) {}, onError: (_) {}).whenComplete(() {
+      if (identical(_inflight[key], future)) _inflight.remove(key);
+    });
+    return future;
+  }
+
+  /// Looks an episode up in the background so it is ready when it is needed.
+  static void prefetch(
+    LuminaModuleRuntime runtime,
+    InstalledModule module,
+    String href,
+    String language,
+  ) {
+    if (href.isEmpty) return;
+    resolve(runtime, module, href, language).then<void>((_) {}, onError: (_) {});
+  }
+}
+
+/// Opens the player straight away (with a loading screen) and resolves the
+/// stream behind it, instead of leaving the episode list frozen until the
+/// module answers. Completes when the player is closed.
 Future<void> openModulePlayer(
   BuildContext context, {
   required LuminaModuleRuntime runtime,
@@ -163,42 +239,184 @@ Future<void> openModulePlayer(
   int resumeAtMs = 0,
   String mode = 'sub',
 }) async {
-  void notice(String text) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-  }
-
+  final messenger = ScaffoldMessenger.of(context);
+  final navigator = Navigator.of(context);
   final href = _pick(episodes[index], const ['href', 'url', 'id']);
   if (href.isEmpty) {
-    notice('The selected episode has no playable reference.');
+    messenger.showSnackBar(
+      const SnackBar(content: Text('The selected episode has no playable reference.')),
+    );
     return;
   }
-  try {
-    final value = await runtime
-        .call(module, 'extractStreamUrl', [href, mode, false])
-        .timeout(const Duration(seconds: 45));
-    final bundle = parseModuleStreams(value);
-    if (bundle.isEmpty) {
-      notice('The module did not return a direct playable URL.');
-      return;
+  // Start the module call now, so it runs during the page transition.
+  ModuleStreamResolver.prefetch(runtime, module, href, mode);
+  final finished = Completer<void>();
+  await navigator.push(MaterialPageRoute<void>(
+    builder: (_) => _PlayerLoadingScreen(
+      runtime: runtime,
+      module: module,
+      titleHref: titleHref,
+      title: title,
+      image: image,
+      episodes: episodes,
+      index: index,
+      resumeAtMs: resumeAtMs,
+      mode: mode,
+      finished: finished,
+    ),
+  ));
+  // pushReplacement completes the push above early; wait for the real player.
+  await finished.future;
+}
+
+class _PlayerLoadingScreen extends StatefulWidget {
+  const _PlayerLoadingScreen({
+    required this.runtime,
+    required this.module,
+    required this.titleHref,
+    required this.title,
+    required this.image,
+    required this.episodes,
+    required this.index,
+    required this.resumeAtMs,
+    required this.mode,
+    required this.finished,
+  });
+
+  final LuminaModuleRuntime runtime;
+  final InstalledModule module;
+  final String titleHref;
+  final String title;
+  final String image;
+  final List<dynamic> episodes;
+  final int index;
+  final int resumeAtMs;
+  final String mode;
+  final Completer<void> finished;
+
+  @override
+  State<_PlayerLoadingScreen> createState() => _PlayerLoadingScreenState();
+}
+
+class _PlayerLoadingScreenState extends State<_PlayerLoadingScreen> {
+  String? _error;
+  bool _replaced = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolve();
+  }
+
+  Future<void> _resolve({bool fresh = false}) async {
+    if (_error != null) setState(() => _error = null);
+    try {
+      final href = _pick(widget.episodes[widget.index], const ['href', 'url', 'id']);
+      final bundle = await ModuleStreamResolver.resolve(
+        widget.runtime,
+        widget.module,
+        href,
+        widget.mode,
+        fresh: fresh,
+      );
+      if (!mounted) return;
+      if (bundle.isEmpty) {
+        setState(() => _error = 'The module did not return a direct playable URL.');
+        return;
+      }
+      _replaced = true;
+      final done = Navigator.of(context).pushReplacement<void, void>(
+        MaterialPageRoute<void>(
+          builder: (_) => ModulePlayerScreen(
+            runtime: widget.runtime,
+            module: widget.module,
+            titleHref: widget.titleHref,
+            title: widget.title,
+            image: widget.image,
+            episodes: widget.episodes,
+            episodeIndex: widget.index,
+            initial: bundle,
+            resumeAtMs: widget.resumeAtMs,
+            initialMode: widget.mode,
+          ),
+        ),
+      );
+      done.whenComplete(() {
+        if (!widget.finished.isCompleted) widget.finished.complete();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e'.replaceFirst(RegExp(r'^(Bad state|Exception):\s*'), ''));
     }
-    if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => ModulePlayerScreen(
-        runtime: runtime,
-        module: module,
-        titleHref: titleHref,
-        title: title,
-        image: image,
-        episodes: episodes,
-        episodeIndex: index,
-        initial: bundle,
-        resumeAtMs: resumeAtMs,
-        initialMode: mode,
+  }
+
+  @override
+  void dispose() {
+    // Backed out before the player opened: nothing more to wait for.
+    if (!_replaced && !widget.finished.isCompleted) widget.finished.complete();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = describeEpisodes(widget.episodes);
+    final number = widget.index < label.length ? label[widget.index].number : widget.index + 1;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        foregroundColor: Colors.white,
+        elevation: 0,
       ),
-    ));
-  } catch (e) {
-    notice('Could not open title: $e');
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.image.isNotEmpty)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    widget.image,
+                    width: 110,
+                    height: 160,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(width: 110, height: 160),
+                  ),
+                ),
+              const SizedBox(height: 16),
+              Text(
+                widget.title,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 4),
+              Text('Episode $number', style: const TextStyle(color: Colors.white70)),
+              const SizedBox(height: 20),
+              if (_error == null) ...[
+                const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 3)),
+                const SizedBox(height: 12),
+                const Text('Getting the stream…', style: TextStyle(color: Colors.white70)),
+              ] else ...[
+                Text(
+                  _error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: () => _resolve(fresh: true),
+                  child: const Text('Try again'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -217,6 +435,11 @@ Future<void> resumeModuleTitle(
   }
 
   try {
+    // The saved episode is known already: look its stream up in parallel with
+    // the episode list instead of after it.
+    final mode = ModuleStreamResolver.lastLanguage[module.id] ??
+        languagesFor(module, const <dynamic>[]).first.id;
+    ModuleStreamResolver.prefetch(runtime, module, entry.episodeHref, mode);
     final value = await runtime
         .call(module, 'extractEpisodes', [entry.titleHref])
         .timeout(const Duration(seconds: 45));
@@ -246,6 +469,7 @@ Future<void> resumeModuleTitle(
       episodes: episodes,
       index: index,
       resumeAtMs: entry.positionMs,
+      mode: mode,
     );
   } catch (e) {
     notice('Could not resume: $e');
@@ -319,6 +543,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
   String? _switching;
   bool _systemVolume = false;
   int _lastPositionMs = 0;
+  int _prefetchedFor = -1;
   int _streamIndex = 0;
   int _subIndex = -1;
   String _mode = 'sub';
@@ -352,6 +577,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     _titleHref = widget.titleHref;
     _episodes = widget.episodes;
     _mode = widget.initialMode;
+    ModuleStreamResolver.lastLanguage[_module.id] = _mode;
     _episodeIndex = widget.episodeIndex;
     _bundle = widget.initial;
     // The player opens in landscape; the Rotate chip still flips to portrait.
@@ -472,6 +698,19 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     final duration = c.value.duration.inMilliseconds;
     if (duration <= 0) return;
     final ep = _episodes[_episodeIndex];
+    // Look the next episode up shortly before this one ends, so "Next episode"
+    // (and autoplay) starts instantly.
+    if (_prefetchedFor != _episodeIndex &&
+        _episodeIndex + 1 < _episodes.length &&
+        duration - c.value.position.inMilliseconds <= 150000) {
+      _prefetchedFor = _episodeIndex;
+      ModuleStreamResolver.prefetch(
+        widget.runtime,
+        _module,
+        _pick(_episodes[_episodeIndex + 1], const ['href', 'url', 'id']),
+        _mode,
+      );
+    }
     if (c.value.position.inMilliseconds / duration >= 0.9) {
       unawaited(_state.markWatched(
         _module.id,
@@ -572,11 +811,18 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     if (mounted) setState(() => _probe = lines.join('\n'));
   }
 
-  Future<ModuleStreamBundle> _fetchBundle(String episodeHref, String mode) async {
-    final value = await widget.runtime
-        .call(_module, 'extractStreamUrl', [episodeHref, mode, false])
-        .timeout(const Duration(seconds: 45));
-    return parseModuleStreams(value);
+  Future<ModuleStreamBundle> _fetchBundle(
+    String episodeHref,
+    String mode, {
+    bool fresh = false,
+  }) {
+    return ModuleStreamResolver.resolve(
+      widget.runtime,
+      _module,
+      episodeHref,
+      mode,
+      fresh: fresh,
+    );
   }
 
   Future<void> _changeEpisode(int index) async {
@@ -618,17 +864,18 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
       if (!mounted) return;
       if (bundle.isEmpty) {
         setState(() => _loading = false);
-        _notice('This module did not return a $mode stream for this episode.');
+        _notice('This module did not return a ${languageLabel(mode)} stream for this episode.');
         return;
       }
       _mode = mode;
+      ModuleStreamResolver.lastLanguage[_module.id] = mode;
       _bundle = bundle;
       _subIndex = _matchSubtitle(bundle);
       await _open(_pickStream(bundle), startAtMs: position);
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
-      _notice('Could not switch to $mode: $e');
+      _notice('Could not switch to ${languageLabel(mode)}: $e');
     }
   }
 
@@ -791,9 +1038,9 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     ).whenComplete(_scheduleHide);
   }
 
-  void _showAudio() => _showSheet('Audio', [
-        _Option('Sub', _mode == 'sub', () => _setMode('sub')),
-        _Option('Dub', _mode == 'dub', () => _setMode('dub')),
+  void _showAudio() => _showSheet('Language', [
+        for (final lang in languagesFor(_module, _episodes))
+          _Option(lang.label, _mode == lang.id, () => _setMode(lang.id)),
       ]);
 
   void _showQuality() => _showSheet('Quality / stream', [
@@ -859,7 +1106,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
     _controller?.pause();
     setState(() => _switching = 'Reloading from ${_module.name}…');
     try {
-      final bundle = await _fetchBundle(href, _mode);
+      final bundle = await _fetchBundle(href, _mode, fresh: true);
       if (!mounted) return;
       if (bundle.isEmpty) {
         throw StateError('${_module.name} did not return a playable link.');
@@ -918,10 +1165,12 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
 
       if (mounted) setState(() => _switching = 'Loading the stream from ${target.name}…');
       final episodeHref = _pick(newEpisodes[index], const ['href', 'url', 'id']);
-      final value = await widget.runtime
-          .call(target, 'extractStreamUrl', [episodeHref, _mode, false])
-          .timeout(const Duration(seconds: 45));
-      final bundle = parseModuleStreams(value);
+      final bundle = await ModuleStreamResolver.resolve(
+        widget.runtime,
+        target,
+        episodeHref,
+        _mode,
+      );
       if (bundle.isEmpty) {
         throw StateError('${target.name} did not return a playable link.');
       }
@@ -1287,7 +1536,7 @@ class _ModulePlayerScreenState extends State<ModulePlayerScreen> {
                       if (hasNext)
                         _chip(Icons.skip_next, 'Next episode',
                             () => _changeEpisode(_episodeIndex + 1)),
-                      _chip(Icons.record_voice_over, _mode == 'sub' ? 'Sub' : 'Dub', _showAudio),
+                      _chip(Icons.translate, languageLabel(_mode), _showAudio),
                       _chip(
                         Icons.hd,
                         _bundle.streams.isEmpty ? 'Quality' : _bundle.streams[_streamIndex].label,
