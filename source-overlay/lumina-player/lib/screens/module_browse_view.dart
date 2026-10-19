@@ -204,6 +204,49 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
+  Future<void> _configureTmdb(InstalledModule module) async {
+    final service = context.read<ModulesService>();
+    final settings = await service.readModuleSettings(module);
+    final controller = TextEditingController(text: (settings['tmdbApiKey'] ?? '').toString());
+    try {
+      final save = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('TMDB API key'),
+          content: TextField(
+            controller: controller,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: 'API key',
+              helperText: 'Saved locally for this installed module. Do not share it publicly.',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Save')),
+          ],
+        ),
+      );
+      if (save != true || !mounted) return;
+      final key = controller.text.trim();
+      if (key.isEmpty) {
+        _notice('Enter your TMDB API key before saving.');
+        return;
+      }
+      await service.updateModuleSetting(module, 'tmdbApiKey', key);
+      _runtime.invalidate(module.id);
+      _notice('TMDB API key saved on this device.');
+      if (_query.text.trim().isNotEmpty) await _search();
+    } catch (e) {
+      _notice('Could not save the TMDB setting: $e');
+    } finally {
+      controller.dispose();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final modules = _videoModules(context.watch<ModulesService>());
@@ -253,8 +296,18 @@ class _ModuleBrowseViewState extends State<ModuleBrowseView> {
                   children: [
                     for (final module in modules) ...[
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                        child: Text(module.name, style: Theme.of(context).textTheme.titleMedium),
+                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                        child: Row(
+                          children: [
+                            Expanded(child: Text(module.name, style: Theme.of(context).textTheme.titleMedium)),
+                            if (module.id == 'kdesa-cornclick')
+                              IconButton(
+                                tooltip: 'Configure TMDB API key',
+                                icon: const Icon(Icons.key_outlined),
+                                onPressed: () => _configureTmdb(module),
+                              ),
+                          ],
+                        ),
                       ),
                       if (_errors.containsKey(module.id))
                         Padding(
