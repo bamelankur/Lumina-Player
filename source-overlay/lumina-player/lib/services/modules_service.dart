@@ -91,6 +91,39 @@ class ModulesService extends ChangeNotifier {
     return root;
   }
 
+  Future<Map<String, dynamic>> readModuleSettings(InstalledModule module) async {
+    final file = File(p.join(module.directory, 'module.json'));
+    if (!await file.exists()) return <String, dynamic>{};
+    final decoded = jsonDecode(await file.readAsString());
+    if (decoded is! Map) return <String, dynamic>{};
+    final config = decoded['config'];
+    if (config is! Map || config['settings'] is! Map) return <String, dynamic>{};
+    return Map<String, dynamic>.from(config['settings'] as Map);
+  }
+
+  Future<void> updateModuleSetting(InstalledModule module, String key, dynamic value) async {
+    final file = File(p.join(module.directory, 'module.json'));
+    if (!await file.exists()) {
+      throw FileSystemException('Installed module is missing module.json', file.path);
+    }
+    final decoded = jsonDecode(await file.readAsString());
+    if (decoded is! Map) throw const FormatException('Module metadata must be a JSON object.');
+    final metadata = Map<String, dynamic>.from(decoded);
+    final configValue = metadata['config'];
+    final config = configValue is Map
+        ? Map<String, dynamic>.from(configValue)
+        : <String, dynamic>{};
+    final settingsValue = config['settings'];
+    final settings = settingsValue is Map
+        ? Map<String, dynamic>.from(settingsValue)
+        : <String, dynamic>{};
+    settings[key] = value;
+    config['settings'] = settings;
+    metadata['config'] = config;
+    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(metadata));
+    notifyListeners();
+  }
+
   Future<void> load() async {
     loading = true;
     error = null;
