@@ -4,7 +4,7 @@ import 'package:provider/provider.dart';
 import 'screens/downloads_screen.dart';
 import 'screens/favorites_screen.dart';
 import 'screens/home_screen.dart';
-import 'screens/modules_screen.dart';
+import 'screens/modules_page.dart';
 import 'screens/settings_screen.dart';
 import 'services/download_service.dart';
 import 'services/favorites_service.dart';
