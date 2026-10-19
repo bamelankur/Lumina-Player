@@ -58,9 +58,12 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
   ModuleHistoryEntry? _last;
   bool _descriptionOpen = false;
 
-  // DUB availability per episode href. Modules do not list which episodes are
-  // dubbed, so in DUB mode the visible episodes are asked for a dub stream.
-  final Map<String, bool> _dubOk = {};
+  // Languages this module offers, and which episodes have which one. Modules
+  // rarely list that per episode, so for languages other than the first the
+  // visible episodes are asked for a stream in that language (results cached).
+  List<ModuleLanguage> _languages = const [];
+  final Map<String, bool> _langOk = {};
+  final Map<String, List<EpisodeInfo>> _seasonCache = {};
   int _probeToken = 0;
   int _probeDone = 0;
   int _probeTotal = 0;
@@ -78,38 +81,26 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     super.dispose();
   }
 
-  // ------------------------------------------------------------------ dub
+  // ------------------------------------------------------------- language
 
-  /// What the module itself says about dub availability, if anything.
-  bool? _declaredDub(dynamic episode) {
-    if (episode is! Map) return null;
-    for (final key in const ['hasDub', 'dub', 'dubbed', 'isDubbed', 'dubAvailable']) {
-      final raw = episode[key];
-      if (raw is bool) return raw;
-      if (raw is num) return raw != 0;
-      if (raw is String) {
-        final t = raw.trim().toLowerCase();
-        if (t == 'true' || t == 'yes' || t == '1') return true;
-        if (t == 'false' || t == 'no' || t == '0') return false;
-      }
-    }
-    for (final key in const ['audio', 'audios', 'languages']) {
-      final raw = episode[key];
-      if (raw == null) continue;
-      final text = raw.toString().trim().toLowerCase();
-      if (text.isEmpty) continue;
-      return text.contains('dub');
-    }
-    return null;
+  bool get _isDefaultLanguage => _languages.isEmpty || _mode == _languages.first.id;
+
+  String get _languageName => languageLabel(_mode);
+
+  /// true = available in the chosen language, false = not, null = not known yet.
+  bool? _languageStatus(EpisodeInfo info) =>
+      _langOk['$_mode|${info.href}'] ?? episodeHasLanguage(_episodes[info.index], _mode);
+
+  /// The first language lists everything (minus episodes known to lack it);
+  /// any other language lists only episodes confirmed to have it.
+  bool _shown(EpisodeInfo info) {
+    final status = _languageStatus(info);
+    return _isDefaultLanguage ? status != false : status == true;
   }
-
-  /// true = dubbed, false = not dubbed, null = not known yet.
-  bool? _dubStatus(EpisodeInfo info) =>
-      _dubOk[info.href] ?? _declaredDub(_episodes[info.index]);
 
   bool get _probing => _probeDone < _probeTotal;
 
-  /// The episodes whose dub status matters right now: the open range, or the
+  /// The episodes whose availability matters right now: the open range, or the
   /// ones matching the number search.
   List<EpisodeInfo> _probeTargets() {
     final season = _inSeason(_season);
@@ -125,9 +116,10 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     return season.sublist(start, end);
   }
 
-  Future<void> _ensureDub() async {
+  Future<void> _ensureLanguage() async {
     final token = ++_probeToken;
-    if (_mode != 'dub' || _episodes.isEmpty) {
+    final language = _mode;
+    if (_isDefaultLanguage || _episodes.isEmpty) {
       if (mounted && _probeTotal != 0) {
         setState(() {
           _probeDone = 0;
@@ -137,7 +129,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
       return;
     }
     final pending = _probeTargets()
-        .where((e) => e.href.isNotEmpty && _dubStatus(e) == null)
+        .where((e) => e.href.isNotEmpty && _languageStatus(e) == null)
         .toList();
     if (!mounted) return;
     setState(() {
@@ -152,24 +144,31 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
         final info = pending[next++];
         bool? ok;
         try {
-          final value = await widget.runtime
-              .call(widget.module, 'extractStreamUrl', [info.href, 'dub', false])
-              .timeout(const Duration(seconds: 30));
-          ok = !parseModuleStreams(value).isEmpty;
+          // Goes through the shared stream cache, so tapping an episode that
+          // was just checked starts without another module call.
+          final bundle = await ModuleStreamResolver.resolve(
+            widget.runtime,
+            widget.module,
+            info.href,
+            language,
+            timeout: const Duration(seconds: 30),
+          );
+          ok = !bundle.isEmpty;
         } catch (_) {
-          // A network error is not proof the dub is missing: leave it unknown.
+          // A network error is not proof the language is missing: leave it unknown.
           ok = null;
         }
         if (token != _probeToken || !mounted) return;
         final result = ok;
         setState(() {
-          if (result != null) _dubOk[info.href] = result;
+          if (result != null) _langOk['$language|${info.href}'] = result;
           _probeDone++;
         });
       }
     }
 
-    await Future.wait([worker(), worker(), worker()]);
+    // Two at a time, so the module stays free for whatever the user taps next.
+    await Future.wait([worker(), worker()]);
   }
 
   // ------------------------------------------------------------- download
@@ -179,7 +178,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
-  Future<ModuleStream?> _pickQuality(ModuleStreamBundle bundle) {
+  Future<ModuleStream?> _pickStream(ModuleStreamBundle bundle) {
     return showModalBottomSheet<ModuleStream>(
       context: context,
       builder: (sheetContext) => SafeArea(
@@ -188,7 +187,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
           children: [
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Download quality', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              child: Text('Download source', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
             ),
             Flexible(
               child: ListView(
@@ -208,15 +207,53 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     );
   }
 
+  Future<HlsVariant?> _pickVariant(List<HlsVariant> variants) {
+    return showModalBottomSheet<HlsVariant>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Text('Download quality', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text('Lower quality downloads faster and takes less space.'),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final variant in variants)
+                    ListTile(
+                      title: Text(variant.label),
+                      subtitle: variant.bandwidth > 0
+                          ? Text('${(variant.bandwidth / 1000000).toStringAsFixed(1)} Mbps')
+                          : null,
+                      onTap: () => Navigator.pop(sheetContext, variant),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _download(EpisodeInfo info) async {
     final downloads = context.read<DownloadService>();
     final mode = _mode;
     _snack('Preparing episode ${info.number}…');
     try {
-      final value = await widget.runtime
-          .call(widget.module, 'extractStreamUrl', [info.href, mode, false])
-          .timeout(const Duration(seconds: 45));
-      final bundle = parseModuleStreams(value);
+      final bundle = await ModuleStreamResolver.resolve(
+        widget.runtime,
+        widget.module,
+        info.href,
+        mode,
+      );
       if (bundle.isEmpty) {
         _snack('The module did not return a downloadable stream for episode ${info.number}.');
         return;
@@ -224,10 +261,37 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
       var stream = bundle.streams.first;
       if (bundle.streams.length > 1) {
         if (!mounted) return;
-        final picked = await _pickQuality(bundle);
+        final picked = await _pickStream(bundle);
         if (picked == null) return;
         stream = picked;
       }
+
+      // Most modules return one HLS playlist that lists several qualities:
+      // read it so the choice can be made here.
+      var url = stream.url;
+      var quality = stream.label;
+      final variants = await DownloadService.fetchHlsVariants(url, stream.headers);
+      var onlyOneQuality = bundle.streams.length == 1;
+      if (variants.length > 1) {
+        onlyOneQuality = false;
+        if (!mounted) return;
+        final picked = await _pickVariant(variants);
+        if (picked == null) return;
+        if (picked.separateAudio) {
+          _snack('That stream keeps its audio in a separate track, which downloads cannot merge yet.');
+          return;
+        }
+        url = picked.url;
+        quality = picked.label;
+      } else if (variants.length == 1) {
+        if (variants.first.separateAudio) {
+          _snack('That stream keeps its audio in a separate track, which downloads cannot merge yet.');
+          return;
+        }
+        url = variants.first.url;
+        quality = variants.first.label;
+      }
+
       final episode = _episodes[info.index];
       var episodeTitle = moduleText(episode, const ['title', 'name']);
       if (episodeTitle.isEmpty) episodeTitle = 'Episode ${info.number}';
@@ -240,11 +304,15 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
         episodeTitle: episodeTitle,
         episodeNumber: info.number,
         mode: mode,
-        quality: stream.label,
-        url: stream.url,
+        quality: quality,
+        url: url,
         headers: stream.headers,
       );
-      _snack('Downloading episode ${info.number}. Progress is on the Downloads tab.');
+      _snack(
+        onlyOneQuality
+            ? 'Downloading episode ${info.number}. This one only offers a single quality. Progress is on the Downloads tab.'
+            : 'Downloading episode ${info.number} ($quality). Progress is on the Downloads tab.',
+      );
     } catch (e) {
       _snack('Could not start the download: $e');
     }
@@ -278,14 +346,16 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
       _href = moduleText(widget.card, const ['href', 'url', 'id', 'link']);
       if (_href.isEmpty) throw StateError('This result does not include a title reference.');
 
-      dynamic details;
-      try {
-        details = await widget.runtime
-            .call(widget.module, 'extractDetails', [_href])
-            .timeout(const Duration(seconds: 20));
-      } catch (_) {
-        details = null;
-      }
+      // Details and episodes are independent: ask for both at once.
+      final detailsFuture = widget.runtime
+          .call(widget.module, 'extractDetails', [_href])
+          .timeout(const Duration(seconds: 20))
+          .then<dynamic>((v) => v, onError: (_) => null);
+      final episodesFuture = widget.runtime
+          .call(widget.module, 'extractEpisodes', [_href])
+          .timeout(const Duration(seconds: 45));
+      episodesFuture.then<void>((_) {}, onError: (_) {});
+      dynamic details = await detailsFuture;
       if (details is List && details.isNotEmpty) details = details.first;
 
       _title = _field(details, const ['title', 'name']);
@@ -294,14 +364,14 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
       _description = _field(details, const ['description', 'synopsis', 'summary', 'overview']);
       _year = _field(details, const ['year', 'released', 'date']);
 
-      final value = await widget.runtime
-          .call(widget.module, 'extractEpisodes', [_href])
-          .timeout(const Duration(seconds: 45));
+      final value = await episodesFuture;
       final episodes = value is List ? value : const <dynamic>[];
       if (episodes.isEmpty) {
         throw StateError('${widget.module.name} returned no episodes for $_title.');
       }
       _episodes = episodes;
+      _seasonCache.clear();
+      _langOk.clear();
       _infos = describeEpisodes(episodes);
       final seen = <String>[];
       for (final info in _infos) {
@@ -309,12 +379,19 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
       }
       _seasons = seen;
       if (!mounted) return;
+      _languages = languagesFor(widget.module, episodes);
+      if (!_languages.any((l) => l.id == _mode)) _mode = _languages.first.id;
       _refreshLast();
       _selectLastWatched();
+      // The episode you are most likely to tap is the one you stopped on.
+      final resume = _last;
+      if (resume != null) {
+        ModuleStreamResolver.prefetch(widget.runtime, widget.module, resume.episodeHref, _mode);
+      }
 
       if (!mounted) return;
       setState(() => _loading = false);
-      unawaited(_ensureDub());
+      unawaited(_ensureLanguage());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -350,12 +427,18 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     }
   }
 
-  List<EpisodeInfo> _inSeason(String season) =>
-      _infos.where((e) => e.season == season).toList();
+  List<EpisodeInfo> _inSeason(String season) => _seasonCache.putIfAbsent(
+        season,
+        () => _infos.where((e) => e.season == season).toList(),
+      );
 
   Future<void> _play(EpisodeInfo info) async {
     final last = _last;
     final resume = (last != null && last.episodeHref == info.href) ? last.positionMs : 0;
+    // Leave the module free for the episode being opened.
+    _probeToken++;
+    _probeDone = 0;
+    _probeTotal = 0;
     await openModulePlayer(
       context,
       runtime: widget.runtime,
@@ -370,12 +453,14 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     );
     if (!mounted) return;
     setState(_refreshLast);
+    unawaited(_ensureLanguage());
   }
 
   void _setMode(String mode) {
     setState(() => _mode = mode);
     _lastMode = mode;
-    unawaited(_ensureDub());
+    ModuleStreamResolver.lastLanguage[widget.module.id] = mode;
+    unawaited(_ensureLanguage());
   }
 
   // ------------------------------------------------------------------ build
@@ -442,11 +527,9 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     final candidates = query.isNotEmpty
         ? seasonEpisodes.where((e) => e.number.toString().contains(query)).toList()
         : (ranges.isEmpty ? <EpisodeInfo>[] : ranges[rangeIndex]);
-    // In DUB mode only episodes that really have a dub are listed.
-    final dubMode = _mode == 'dub';
-    final visible = dubMode
-        ? candidates.where((e) => _dubStatus(e) == true).toList()
-        : candidates;
+    // Other than the first language, only episodes confirmed to have it show.
+    final languageMode = !_isDefaultLanguage;
+    final visible = candidates.where(_shown).toList();
 
     String rangeLabel(List<EpisodeInfo> r) => '${r.first.number}-${r.last.number}';
 
@@ -510,11 +593,29 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                 color: scheme.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Column(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _audioRow(Icons.closed_caption, 'SUB', 'sub'),
-                  const Divider(height: 24),
-                  _audioRow(Icons.mic, 'DUB', 'dub'),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Icon(Icons.translate, color: scheme.primary),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        for (final lang in _languages)
+                          ChoiceChip(
+                            label: Text(lang.label),
+                            selected: _mode == lang.id,
+                            showCheckmark: false,
+                            onSelected: (_) => _setMode(lang.id),
+                          ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -573,7 +674,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                                 _range = value;
                                 _numberController.clear();
                               });
-                              unawaited(_ensureDub());
+                              unawaited(_ensureLanguage());
                             },
                           )
                         else if (ranges.isNotEmpty)
@@ -587,7 +688,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                         keyboardType: TextInputType.number,
                         onChanged: (_) {
                           setState(() {});
-                          unawaited(_ensureDub());
+                          unawaited(_ensureLanguage());
                         },
                         decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search),
@@ -603,7 +704,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
             ),
           ),
         ),
-        if (dubMode)
+        if (languageMode)
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -612,8 +713,8 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                 children: [
                   Text(
                     _probing
-                        ? 'Checking which episodes are dubbed… $_probeDone/$_probeTotal'
-                        : '${visible.length} dubbed episode${visible.length == 1 ? '' : 's'} here',
+                        ? 'Checking which episodes have $_languageName… $_probeDone/$_probeTotal'
+                        : '${visible.length} episode${visible.length == 1 ? '' : 's'} in $_languageName here',
                     style: textTheme.bodySmall,
                   ),
                   if (_probing) ...[
@@ -636,10 +737,10 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
                       child: Text(
                         _probing
                             ? 'Checking…'
-                            : dubMode
+                            : languageMode
                                 ? (query.isEmpty
-                                    ? 'No dubbed episodes in this range.'
-                                    : 'No dubbed episode matches "$query".')
+                                    ? 'No episodes in $_languageName in this range.'
+                                    : 'No $_languageName episode matches "$query".')
                                 : (query.isEmpty ? 'No episodes.' : 'No episode matches "$query".'),
                       ),
                     ),
@@ -682,25 +783,6 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
     return ClipRRect(borderRadius: BorderRadius.circular(8), child: image);
   }
 
-  Widget _audioRow(IconData icon, String label, String value) {
-    return Row(
-      children: [
-        Icon(icon, color: Theme.of(context).colorScheme.primary),
-        const SizedBox(width: 10),
-        SizedBox(
-          width: 52,
-          child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
-        ),
-        ChoiceChip(
-          label: Text(widget.module.name),
-          selected: _mode == value,
-          showCheckmark: false,
-          onSelected: (_) => _setMode(value),
-        ),
-      ],
-    );
-  }
-
   Widget _seasonButton(String season, ColorScheme scheme) {
     final selected = season == _season;
     return OutlinedButton(
@@ -719,7 +801,7 @@ class _ModuleTitleScreenState extends State<ModuleTitleScreen> {
           _range = 0;
           _numberController.clear();
         });
-        unawaited(_ensureDub());
+        unawaited(_ensureLanguage());
       },
       child: Text(seasonLabel(season), style: const TextStyle(fontWeight: FontWeight.w600)),
     );
