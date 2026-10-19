@@ -85,6 +85,9 @@ class LuminaModuleRuntime {
     final runtimeConfig = config['runtime'] is Map
         ? Map<String, dynamic>.from(config['runtime'] as Map)
         : <String, dynamic>{};
+    final moduleSettings = config['settings'] is Map
+        ? Map<String, dynamic>.from(config['settings'] as Map)
+        : <String, dynamic>{};
     final entry = (runtimeConfig['entry'] ?? 'index.js').toString();
     if (entry.isEmpty || entry.contains('..') || entry.startsWith('/') || entry.contains(r'\\')) {
       throw FormatException('Module "${module.name}" has an unsafe runtime entry path.');
@@ -100,6 +103,14 @@ class LuminaModuleRuntime {
     }
 
     final engine = getJavascriptRuntime();
+    final settingsJson = jsonEncode(moduleSettings);
+    final configured = await engine.evaluateAsync(
+      'globalThis.LuminaModuleConfig = $settingsJson;',
+    );
+    if (configured.isError) {
+      engine.dispose();
+      throw StateError('Could not configure JavaScript module runtime.');
+    }
     final source = await entryFile.readAsString();
     final loaded = await engine.evaluateAsync(source);
     if (loaded.isError) {
@@ -110,6 +121,12 @@ class LuminaModuleRuntime {
     final context = _ModuleContext(engine);
     _contexts[module.id] = context;
     return context;
+  }
+
+  /// Disposes a cached module context so updated local settings are picked up.
+  void invalidate(String moduleId) {
+    final context = _contexts.remove(moduleId);
+    context?.engine.dispose();
   }
 
   void dispose() {
