@@ -12,6 +12,80 @@ const _kDownloadsKey = 'lumina.downloads.v1';
 
 enum DownloadState { downloading, done, failed }
 
+/// One quality listed by an HLS master playlist.
+class HlsVariant {
+  const HlsVariant({
+    required this.label,
+    required this.url,
+    required this.bandwidth,
+    this.separateAudio = false,
+  });
+
+  final String label;
+  final String url;
+  final int bandwidth;
+
+  /// The audio of this quality lives in its own playlist, which a plain
+  /// segment download cannot merge into the video.
+  final bool separateAudio;
+}
+
+/// Reads an HLS master playlist: the qualities it offers, best first.
+/// Empty when [url] is not a master playlist (or cannot be read).
+List<HlsVariant> parseHlsVariants(String text, Uri base) {
+  if (!text.contains('#EXT-X-STREAM-INF')) return const [];
+  final lines = LineSplitter.split(text).map((l) => l.trim()).toList();
+
+  // Audio groups that point at their own playlist.
+  final separateAudioGroups = <String>{};
+  for (final l in lines) {
+    if (!l.startsWith('#EXT-X-MEDIA') || !l.contains('TYPE=AUDIO') || !l.contains('URI=')) continue;
+    final group = RegExp(r'GROUP-ID="([^"]+)"').firstMatch(l)?.group(1);
+    if (group != null) separateAudioGroups.add(group);
+  }
+
+  final byLabel = <String, HlsVariant>{};
+  final heights = <String, int>{};
+  for (var i = 0; i < lines.length; i++) {
+    final line = lines[i];
+    if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+    String? uri;
+    for (var j = i + 1; j < lines.length; j++) {
+      if (lines[j].isEmpty || lines[j].startsWith('#')) continue;
+      uri = lines[j];
+      break;
+    }
+    if (uri == null) continue;
+    final bandwidth = int.tryParse(
+          RegExp(r'(?:^|[:,])BANDWIDTH=(\d+)').firstMatch(line)?.group(1) ?? '',
+        ) ??
+        0;
+    final resolution = RegExp(r'RESOLUTION=(\d+)x(\d+)').firstMatch(line);
+    final height = resolution == null ? 0 : int.tryParse(resolution.group(2) ?? '') ?? 0;
+    final label = height > 0
+        ? '${height}p'
+        : (bandwidth > 0 ? '${(bandwidth / 1000000).toStringAsFixed(1)} Mbps' : 'Stream ${byLabel.length + 1}');
+    final audioGroup = RegExp(r'AUDIO="([^"]+)"').firstMatch(line)?.group(1);
+    final variant = HlsVariant(
+      label: label,
+      url: base.resolve(uri).toString(),
+      bandwidth: bandwidth,
+      separateAudio: audioGroup != null && separateAudioGroups.contains(audioGroup),
+    );
+    final existing = byLabel[label];
+    if (existing == null || bandwidth > existing.bandwidth) {
+      byLabel[label] = variant;
+      heights[label] = height;
+    }
+  }
+  final list = byLabel.values.toList();
+  list.sort((a, b) {
+    final byHeight = (heights[b.label] ?? 0).compareTo(heights[a.label] ?? 0);
+    return byHeight != 0 ? byHeight : b.bandwidth.compareTo(a.bandwidth);
+  });
+  return list;
+}
+
 /// One downloaded (or downloading) episode.
 class DownloadItem {
   DownloadItem({
@@ -112,6 +186,12 @@ class _Cancel {
   }
 }
 
+const _separateAudioMessage =
+    'This stream keeps its audio in a separate track, which downloads cannot merge yet.';
+
+/// How many HLS segments are fetched at the same time.
+const _hlsParallelSegments = 8;
+
 class _Cancelled implements Exception {}
 
 class _Unsupported implements Exception {
@@ -140,6 +220,25 @@ class DownloadService extends ChangeNotifier {
     final list = _items.values.toList();
     list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return list;
+  }
+
+  /// The qualities offered by the playlist at [url], best first. Empty when it
+  /// is not an HLS master playlist (single quality, or a direct file).
+  static Future<List<HlsVariant>> fetchHlsVariants(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.path.toLowerCase().endsWith('.m3u8')) return const [];
+    try {
+      final res = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode >= 400) return const [];
+      return parseHlsVariants(res.body, uri);
+    } catch (_) {
+      return const [];
+    }
   }
 
   static String keyFor(String moduleId, String episodeHref, String mode) =>
@@ -400,26 +499,11 @@ class DownloadService extends ChangeNotifier {
 
     // A master playlist lists several qualities: take the highest bandwidth.
     if (text.contains('#EXT-X-STREAM-INF')) {
-      final lines = LineSplitter.split(text).map((l) => l.trim()).toList();
-      String? bestUri;
-      var bestBandwidth = -1;
-      for (var i = 0; i < lines.length; i++) {
-        if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
-        final bw = int.tryParse(
-              RegExp(r'BANDWIDTH=(\d+)').firstMatch(lines[i])?.group(1) ?? '',
-            ) ??
-            0;
-        for (var j = i + 1; j < lines.length; j++) {
-          if (lines[j].isEmpty || lines[j].startsWith('#')) continue;
-          if (bw > bestBandwidth) {
-            bestBandwidth = bw;
-            bestUri = lines[j];
-          }
-          break;
-        }
-      }
-      if (bestUri == null) throw _Unsupported('The playlist had no playable variant.');
-      uri = uri.resolve(bestUri);
+      final variants = parseHlsVariants(text, uri);
+      if (variants.isEmpty) throw _Unsupported('The playlist had no playable variant.');
+      final best = variants.first;
+      if (best.separateAudio) throw _Unsupported(_separateAudioMessage);
+      uri = Uri.parse(best.url);
       text = await _getText(client, uri, headers);
     }
 
@@ -476,8 +560,18 @@ class DownloadService extends ChangeNotifier {
         sink.add(init);
         written += init.length;
       }
+      // Fetch several segments at once but write them in order. One at a time
+      // is limited by round-trip latency and is far slower.
+      final inFlight = <int, Future<List<int>>>{};
+      var started = 0;
       for (var i = 0; i < segments.length; i++) {
-        final bytes = await fetch(segments[i]);
+        while (started < segments.length && started < i + _hlsParallelSegments) {
+          final future = fetch(segments[started]);
+          future.ignore(); // errors are raised below, when it is awaited in order
+          inFlight[started] = future;
+          started++;
+        }
+        final bytes = await inFlight.remove(i)!;
         sink.add(bytes);
         written += bytes.length;
         item.progress = (i + 1) / segments.length;
